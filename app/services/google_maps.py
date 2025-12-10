@@ -39,10 +39,28 @@ class GoogleMapsScraper:
     def _browser_context(self) -> Generator[Page, None, None]:
         """ブラウザコンテキストマネージャー"""
         playwright = sync_playwright().start()
-        browser = playwright.chromium.launch(headless=self.headless)
+        # メモリ使用量を削減するブラウザ引数
+        browser = playwright.chromium.launch(
+            headless=self.headless,
+            args=[
+                "--disable-dev-shm-usage",  # /dev/shm使用を無効化（メモリ節約）
+                "--disable-gpu",  # GPU無効化
+                "--no-sandbox",  # サンドボックス無効化
+                "--single-process",  # シングルプロセスモード
+                "--disable-setuid-sandbox",
+                "--disable-extensions",  # 拡張機能無効化
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-sync",
+                "--disable-translate",
+                "--no-first-run",
+                "--disable-features=site-per-process",  # プロセス分離無効化
+                "--js-flags=--max-old-space-size=256",  # JSヒープ制限
+            ],
+        )
         context = browser.new_context(
             locale="ja-JP",
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1280, "height": 720},  # 少し小さく
             user_agent=(
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
