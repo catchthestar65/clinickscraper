@@ -57,8 +57,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/health || exit 1
 
 # gunicornで起動（Playwright用に最適化）
-# - workers=1: Playwrightはシングルワーカーで安定動作
-# - threads削除: asyncio競合を回避
+# - workers=2: ヘルスチェック用とスクレイピング用
+# - threads削除: asyncio競合を回避（ThreadPoolExecutorで別途処理）
 # - timeout=600: 長時間スクレイピング対応（10分）
-# - graceful-timeout=600: 正常終了待機時間
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--graceful-timeout", "600", "--workers", "1", "app.main:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--graceful-timeout", "600", "--workers", "2", "app.main:app"]
