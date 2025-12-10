@@ -115,39 +115,33 @@ class GoogleMapsScraper:
             raise
         finally:
             logger.info("[BROWSER] クリーンアップ開始...")
-            # タイムアウト付きでクリーンアップ（ハング防止）
-            cleanup_timeout = 10  # 秒
+            cleanup_start = time.time()
 
-            def _close_with_timeout(func, name: str) -> None:
-                """タイムアウト付きでクローズ処理を実行"""
-                import threading
-                result = {"done": False, "error": None}
-
-                def _run():
-                    try:
-                        func()
-                        result["done"] = True
-                    except Exception as e:
-                        result["error"] = e
-
-                thread = threading.Thread(target=_run, daemon=True)
-                thread.start()
-                thread.join(timeout=cleanup_timeout)
-
-                if thread.is_alive():
-                    logger.warning(f"[BROWSER] {name}がタイムアウト ({cleanup_timeout}秒) - スキップ")
-                elif result["error"]:
-                    logger.warning(f"[BROWSER] {name}エラー: {result['error']}")
-                else:
-                    logger.info(f"[BROWSER] {name}完了")
-
+            # シンプルなtry/exceptでクリーンアップ
+            # スレッディングはPlaywrightのasyncio状態を破壊するため使用しない
             if context:
-                _close_with_timeout(context.close, "コンテキスト終了")
-            if browser:
-                _close_with_timeout(browser.close, "ブラウザ終了")
-            if playwright:
-                _close_with_timeout(playwright.stop, "Playwright停止")
+                try:
+                    context.close()
+                    logger.info("[BROWSER] コンテキスト終了完了")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] コンテキスト終了エラー: {e}")
 
+            if browser:
+                try:
+                    browser.close()
+                    logger.info("[BROWSER] ブラウザ終了完了")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] ブラウザ終了エラー: {e}")
+
+            if playwright:
+                try:
+                    playwright.stop()
+                    logger.info("[BROWSER] Playwright停止完了")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] Playwright停止エラー: {e}")
+
+            cleanup_elapsed = time.time() - cleanup_start
+            logger.info(f"[BROWSER] クリーンアップ完了 ({cleanup_elapsed:.1f}秒)")
             _log_memory("ブラウザ終了後")
 
     def search(self, query: str, max_results: int | None = None) -> list[Clinic]:
