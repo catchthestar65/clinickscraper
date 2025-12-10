@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: clinic-scraper
+    runtime: docker
+    repo: https://github.com/catchthestar65/clinickscraper
+    branch: main
+
+    # 環境変数
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: GOOGLE_SHEETS_CREDENTIALS
+        sync: false
+      - key: GOOGLE_SHEETS_ID
+        sync: false
+      - key: GOOGLE_SHEETS_NAME
+        value: "営業リスト"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FLASK_ENV
+        value: "production"
+
+    # ヘルスチェック
+    healthCheckPath: /health
+
+    # 自動デプロイ
+    autoDeploy: true
+
+    # リソース設定（Playwrightには十分なメモリが必要）
+    plan: standard

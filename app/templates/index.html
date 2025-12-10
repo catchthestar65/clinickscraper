@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AGAクリニック スクレイパー</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div x-data="scraper()" x-init="init()" class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- ヘッダー -->
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-2xl font-bold text-gray-800">AGAクリニック スクレイパー</h1>
+            <a href="/settings" class="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded transition">
+                設定
+            </a>
+        </div>
+
+        <!-- 検索フォーム -->
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="mb-4">
+                <label class="block text-gray-700 font-medium mb-2">
+                    検索地域（カンマ区切りで複数入力可）
+                </label>
+                <input
+                    type="text"
+                    x-model="regions"
+                    placeholder="新宿, 渋谷, 池袋"
+                    class="w-full border border-gray-300 rounded px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    :disabled="isRunning"
+                >
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-gray-700 font-medium mb-2">検索キーワード</label>
+                <input
+                    type="text"
+                    x-model="searchSuffix"
+                    placeholder="AGA"
+                    class="w-full border border-gray-300 rounded px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    :disabled="isRunning"
+                >
+            </div>
+
+            <button
+                @click="startScraping()"
+                :disabled="isRunning || !regions.trim()"
+                class="w-full bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white font-medium py-3 rounded transition"
+            >
+                <span x-show="!isRunning">検索実行</span>
+                <span x-show="isRunning" class="flex items-center justify-center">
+                    <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    実行中...
+                </span>
+            </button>
+        </div>
+
+        <!-- ログ表示 -->
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-medium text-gray-800">実行ログ</h2>
+                <button
+                    @click="logs = []"
+                    class="text-sm text-gray-500 hover:text-gray-700"
+                    x-show="logs.length > 0"
+                >
+                    クリア
+                </button>
+            </div>
+            <div
+                x-ref="logContainer"
+                class="bg-gray-900 text-green-400 font-mono text-sm rounded p-4 h-64 overflow-y-auto"
+            >
+                <template x-for="(log, index) in logs" :key="index">
+                    <div
+                        :class="{
+                            'text-red-400': log.includes('[ERROR]'),
+                            'text-yellow-400': log.includes('[WARN]')
+                        }"
+                        x-text="log"
+                    ></div>
+                </template>
+                <div x-show="logs.length === 0" class="text-gray-500">
+                    ログがここに表示されます
+                </div>
+            </div>
+        </div>
+
+        <!-- 統計情報 -->
+        <div x-show="stats.totalFound > 0" x-cloak class="bg-white rounded-lg shadow p-6 mb-6">
+            <h2 class="text-lg font-medium text-gray-800 mb-4">実行結果サマリー</h2>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="text-center p-3 bg-blue-50 rounded">
+                    <div class="text-2xl font-bold text-blue-600" x-text="stats.totalFound"></div>
+                    <div class="text-sm text-gray-600">検索結果</div>
+                </div>
+                <div class="text-center p-3 bg-yellow-50 rounded">
+                    <div class="text-2xl font-bold text-yellow-600" x-text="stats.excludedCount"></div>
+                    <div class="text-sm text-gray-600">除外</div>
+                </div>
+                <div class="text-center p-3 bg-green-50 rounded">
+                    <div class="text-2xl font-bold text-green-600" x-text="stats.validCount"></div>
+                    <div class="text-sm text-gray-600">有効</div>
+                </div>
+                <div class="text-center p-3 bg-purple-50 rounded">
+                    <div class="text-2xl font-bold text-purple-600" x-text="stats.newCount"></div>
+                    <div class="text-sm text-gray-600">新規追加</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 結果プレビュー -->
+        <div x-show="results.length > 0" x-cloak class="bg-white rounded-lg shadow p-6">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-lg font-medium text-gray-800">
+                    結果プレビュー（<span x-text="results.length"></span>件）
+                </h2>
+                <a
+                    :href="sheetsUrl"
+                    target="_blank"
+                    x-show="sheetsUrl"
+                    class="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded text-sm transition"
+                >
+                    Google Sheetsで開く
+                </a>
+            </div>
+
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-4 py-2 text-left">No.</th>
+                            <th class="px-4 py-2 text-left">クリニック名</th>
+                            <th class="px-4 py-2 text-left">所在地</th>
+                            <th class="px-4 py-2 text-left">評価</th>
+                            <th class="px-4 py-2 text-left">口コミ</th>
+                            <th class="px-4 py-2 text-left">URL</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <template x-for="(clinic, index) in results" :key="index">
+                            <tr class="border-t hover:bg-gray-50">
+                                <td class="px-4 py-2" x-text="index + 1"></td>
+                                <td class="px-4 py-2" x-text="clinic.name"></td>
+                                <td class="px-4 py-2" x-text="clinic.area || '-'"></td>
+                                <td class="px-4 py-2" x-text="clinic.rating || '-'"></td>
+                                <td class="px-4 py-2" x-text="clinic.reviews || '-'"></td>
+                                <td class="px-4 py-2">
+                                    <a
+                                        x-show="clinic.url"
+                                        :href="clinic.url"
+                                        target="_blank"
+                                        class="text-blue-500 hover:underline"
+                                    >
+                                        リンク
+                                    </a>
+                                    <span x-show="!clinic.url" class="text-gray-400">-</span>
+                                </td>
+                            </tr>
+                        </template>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function scraper() {
+            return {
+                regions: '',
+                searchSuffix: 'AGA',
+                isRunning: false,
+                logs: [],
+                results: [],
+                sheetsUrl: '',
+                stats: {
+                    totalFound: 0,
+                    validCount: 0,
+                    excludedCount: 0,
+                    newCount: 0
+                },
+
+                async init() {
+                    try {
+                        const res = await fetch('/api/settings/');
+                        const settings = await res.json();
+                        this.searchSuffix = settings.search_suffix || 'AGA';
+                        if (settings.google_sheets?.spreadsheet_id) {
+                            this.sheetsUrl = `https://docs.google.com/spreadsheets/d/${settings.google_sheets.spreadsheet_id}`;
+                        }
+                    } catch (e) {
+                        console.error('Failed to load settings:', e);
+                    }
+                },
+
+                addLog(message) {
+                    const now = new Date().toLocaleTimeString('ja-JP');
+                    this.logs.push(`[${now}] ${message}`);
+                    // 自動スクロール
+                    this.$nextTick(() => {
+                        const container = this.$refs.logContainer;
+                        if (container) {
+                            container.scrollTop = container.scrollHeight;
+                        }
+                    });
+                },
+
+                async startScraping() {
+                    if (!this.regions.trim()) {
+                        alert('検索地域を入力してください');
+                        return;
+                    }
+
+                    this.isRunning = true;
+                    this.logs = [];
+                    this.results = [];
+                    this.stats = { totalFound: 0, validCount: 0, excludedCount: 0, newCount: 0 };
+
+                    const regionList = this.regions
+                        .split(/[,、]/)
+                        .map(r => r.trim())
+                        .filter(r => r);
+
+                    this.addLog(`検索開始: ${regionList.join(', ')}`);
+
+                    try {
+                        const response = await fetch('/api/scrape', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                regions: regionList,
+                                search_suffix: this.searchSuffix
+                            })
+                        });
+
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = '';
+
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+
+                            buffer += decoder.decode(value, { stream: true });
+                            const lines = buffer.split('\n');
+                            buffer = lines.pop() || '';
+
+                            for (const line of lines) {
+                                if (line.startsWith('data: ')) {
+                                    try {
+                                        const data = JSON.parse(line.slice(6));
+                                        this.handleSSEMessage(data);
+                                    } catch (e) {
+                                        console.error('Parse error:', e);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (error) {
+                        this.addLog(`[ERROR] ${error.message}`);
+                    } finally {
+                        this.isRunning = false;
+                    }
+                },
+
+                handleSSEMessage(data) {
+                    switch (data.type) {
+                        case 'log':
+                            this.addLog(data.message);
+                            break;
+                        case 'complete':
+                            this.results = data.clinics || [];
+                            this.stats = {
+                                totalFound: data.total_found || 0,
+                                validCount: data.valid_count || 0,
+                                excludedCount: data.excluded_count || 0,
+                                newCount: data.new_count || 0
+                            };
+                            this.addLog('処理完了');
+                            break;
+                        case 'error':
+                            this.addLog(`[ERROR] ${data.message}`);
+                            break;
+                    }
+                }
+            };
+        }
+    </script>
+</body>
+</html>

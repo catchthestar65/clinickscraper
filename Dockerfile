@@ -1,0 +1,55 @@
+FROM python:3.11-slim
+
+# 必要なシステムパッケージインストール
+RUN apt-get update && apt-get install -y \
+    wget \
+    gnupg \
+    ca-certificates \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libatspi2.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Python依存関係インストール
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Playwrightブラウザインストール
+RUN playwright install chromium
+RUN playwright install-deps chromium
+
+# アプリケーションコピー
+COPY . .
+
+# 設定ディレクトリの権限
+RUN chmod -R 755 /app/config
+
+# 非rootユーザーで実行
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 5000
+
+# ヘルスチェック
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost:5000/health || exit 1
+
+# gunicornで起動（タイムアウト延長：スクレイピングに時間がかかるため）
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "--workers", "2", "--threads", "4", "app.main:app"]

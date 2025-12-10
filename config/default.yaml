@@ -1,0 +1,35 @@
+project_name: "AGA営業リスト"
+search_suffix: "AGA"
+
+google_sheets:
+  spreadsheet_id: ""
+  sheet_name: "営業リスト"
+
+scraping:
+  max_results_per_query: 50
+  scroll_timeout_seconds: 30
+  page_load_timeout_seconds: 60
+
+claude:
+  model: "claude-sonnet-4-20250514"
+  batch_size: 10
+  max_tokens: 4096
+
+output_columns:
+  - "No."
+  - "クリニック名"
+  - "公式サイトURL"
+  - "問い合わせフォームURL\nor\nメールアドレス"
+  - "お知らせ/ブログURL"
+  - "所在地（区）"
+  - "電話番号"
+  - "評価"
+  - "口コミ数"
+  - "ステータス"
+  - "初回送信日"
+  - "フォロー1回目"
+  - "フォロー2回目"
+  - "合意日"
+  - "掲載日"
+  - "リンク確認日"
+  - "備考"

@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>設定 - AGAクリニック スクレイパー</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <style>
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div x-data="settingsPage()" x-init="loadSettings()" class="container mx-auto px-4 py-8 max-w-4xl">
+        <!-- ヘッダー -->
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-2xl font-bold text-gray-800">設定</h1>
+            <a href="/" class="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded transition">
+                戻る
+            </a>
+        </div>
+
+        <!-- プロジェクト設定 -->
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <h2 class="text-lg font-medium text-gray-800 mb-4 flex items-center">
+                <span class="mr-2">&#9632;</span> プロジェクト設定
+            </h2>
+
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">プロジェクト名</label>
+                <input
+                    type="text"
+                    x-model="settings.project_name"
+                    class="w-full border border-gray-300 rounded px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">
+                    検索サフィックス（「地域名 + この文字列」で検索）
+                </label>
+                <input
+                    type="text"
+                    x-model="settings.search_suffix"
+                    placeholder="AGA"
+                    class="w-full border border-gray-300 rounded px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+            </div>
+        </div>
+
+        <!-- 除外キーワード -->
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <h2 class="text-lg font-medium text-gray-800 mb-4 flex items-center">
+                <span class="mr-2">&#9632;</span> 除外キーワード
+            </h2>
+            <p class="text-sm text-gray-600 mb-4">
+                クリニック名にこれらのキーワードが含まれる場合、自動的に除外されます
+            </p>
+
+            <div class="max-h-64 overflow-y-auto mb-4 border rounded">
+                <template x-for="(keyword, index) in settings.exclusion_keywords" :key="index">
+                    <div class="flex justify-between items-center px-4 py-2 border-b last:border-b-0 hover:bg-gray-50">
+                        <span x-text="keyword"></span>
+                        <button
+                            @click="removeKeyword(index)"
+                            class="text-red-500 hover:text-red-700 text-sm transition"
+                        >
+                            削除
+                        </button>
+                    </div>
+                </template>
+                <div
+                    x-show="settings.exclusion_keywords.length === 0"
+                    class="px-4 py-2 text-gray-400"
+                >
+                    除外キーワードがありません
+                </div>
+            </div>
+
+            <div class="flex gap-2">
+                <input
+                    type="text"
+                    x-model="newKeyword"
+                    placeholder="新しいキーワード"
+                    class="flex-1 border border-gray-300 rounded px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    @keyup.enter="addKeyword()"
+                >
+                <button
+                    @click="addKeyword()"
+                    :disabled="!newKeyword.trim()"
+                    class="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 disabled:cursor-not-allowed text-white px-4 py-2 rounded transition"
+                >
+                    追加
+                </button>
+            </div>
+        </div>
+
+        <!-- Google Sheets連携 -->
+        <div class="bg-white rounded-lg shadow p-6 mb-6">
+            <h2 class="text-lg font-medium text-gray-800 mb-4 flex items-center">
+                <span class="mr-2">&#9632;</span> Google Sheets連携
+            </h2>
+
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">スプレッドシートID</label>
+                <input
+                    type="text"
+                    x-model="settings.google_sheets.spreadsheet_id"
+                    placeholder="1Xj1qCCoVwoBM0X1vETo1KZ6uFggaSsdn"
+                    class="w-full border border-gray-300 rounded px-4 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    readonly
+                >
+                <p class="text-xs text-gray-500 mt-1">
+                    URLから取得: https://docs.google.com/spreadsheets/d/<span class="text-blue-500 font-medium">[この部分]</span>/edit
+                    <br>
+                    <span class="text-yellow-600">※ 環境変数で設定してください</span>
+                </p>
+            </div>
+
+            <div class="mb-4">
+                <label class="block text-gray-700 mb-2">シート名</label>
+                <input
+                    type="text"
+                    x-model="settings.google_sheets.sheet_name"
+                    placeholder="営業リスト"
+                    class="w-full border border-gray-300 rounded px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+            </div>
+
+            <div class="flex items-center gap-4">
+                <button
+                    @click="testConnection()"
+                    :disabled="testing"
+                    class="bg-green-500 hover:bg-green-600 disabled:bg-gray-400 text-white px-4 py-2 rounded transition"
+                >
+                    <span x-show="!testing">接続テスト</span>
+                    <span x-show="testing" class="flex items-center">
+                        <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        テスト中...
+                    </span>
+                </button>
+                <span x-show="connectionStatus === 'success'" x-cloak class="text-green-600 flex items-center">
+                    <svg class="w-5 h-5 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>
+                    接続成功
+                </span>
+                <span x-show="connectionStatus === 'error'" x-cloak class="text-red-600 flex items-center">
+                    <svg class="w-5 h-5 mr-1" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path></svg>
+                    <span x-text="connectionError"></span>
+                </span>
+            </div>
+        </div>
+
+        <!-- 保存ボタン -->
+        <div class="flex justify-end">
+            <button
+                @click="saveSettings()"
+                :disabled="saving"
+                class="bg-blue-500 hover:bg-blue-600 disabled:bg-gray-400 text-white px-8 py-3 rounded font-medium transition"
+            >
+                <span x-show="!saving">設定を保存</span>
+                <span x-show="saving" class="flex items-center">
+                    <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    保存中...
+                </span>
+            </button>
+        </div>
+
+        <!-- 保存完了メッセージ -->
+        <div
+            x-show="saveMessage"
+            x-cloak
+            x-transition:enter="transition ease-out duration-300"
+            x-transition:enter-start="opacity-0 transform translate-y-2"
+            x-transition:enter-end="opacity-100 transform translate-y-0"
+            x-transition:leave="transition ease-in duration-200"
+            x-transition:leave-start="opacity-100"
+            x-transition:leave-end="opacity-0"
+            class="fixed bottom-4 right-4 bg-green-500 text-white px-6 py-3 rounded shadow-lg"
+        >
+            設定を保存しました
+        </div>
+    </div>
+
+    <script>
+        function settingsPage() {
+            return {
+                settings: {
+                    project_name: '',
+                    search_suffix: 'AGA',
+                    exclusion_keywords: [],
+                    google_sheets: {
+                        spreadsheet_id: '',
+                        sheet_name: '営業リスト'
+                    }
+                },
+                newKeyword: '',
+                testing: false,
+                connectionStatus: '',
+                connectionError: '',
+                saving: false,
+                saveMessage: false,
+
+                async loadSettings() {
+                    try {
+                        const res = await fetch('/api/settings/');
+                        const data = await res.json();
+                        this.settings = {
+                            project_name: data.project_name || '',
+                            search_suffix: data.search_suffix || 'AGA',
+                            exclusion_keywords: data.exclusion_keywords || [],
+                            google_sheets: {
+                                spreadsheet_id: data.google_sheets?.spreadsheet_id || '',
+                                sheet_name: data.google_sheets?.sheet_name || '営業リスト'
+                            }
+                        };
+                    } catch (e) {
+                        console.error('Failed to load settings:', e);
+                    }
+                },
+
+                addKeyword() {
+                    const keyword = this.newKeyword.trim();
+                    if (keyword && !this.settings.exclusion_keywords.includes(keyword)) {
+                        this.settings.exclusion_keywords.push(keyword);
+                        this.newKeyword = '';
+                    }
+                },
+
+                removeKeyword(index) {
+                    this.settings.exclusion_keywords.splice(index, 1);
+                },
+
+                async testConnection() {
+                    this.testing = true;
+                    this.connectionStatus = '';
+                    this.connectionError = '';
+
+                    try {
+                        const res = await fetch('/api/settings/test-sheets', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                        const data = await res.json();
+
+                        if (data.success) {
+                            this.connectionStatus = 'success';
+                        } else {
+                            this.connectionStatus = 'error';
+                            this.connectionError = data.error || '接続に失敗しました';
+                        }
+                    } catch (e) {
+                        this.connectionStatus = 'error';
+                        this.connectionError = e.message;
+                    }
+
+                    this.testing = false;
+                },
+
+                async saveSettings() {
+                    this.saving = true;
+
+                    try {
+                        const res = await fetch('/api/settings/', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                project_name: this.settings.project_name,
+                                search_suffix: this.settings.search_suffix,
+                                sheet_name: this.settings.google_sheets.sheet_name,
+                                exclusion_keywords: this.settings.exclusion_keywords
+                            })
+                        });
+
+                        const data = await res.json();
+
+                        if (data.success) {
+                            this.saveMessage = true;
+                            setTimeout(() => this.saveMessage = false, 3000);
+                        } else {
+                            alert('保存に失敗しました: ' + (data.error || '不明なエラー'));
+                        }
+                    } catch (e) {
+                        alert('保存に失敗しました: ' + e.message);
+                    }
+
+                    this.saving = false;
+                }
+            };
+        }
+    </script>
+</body>
+</html>

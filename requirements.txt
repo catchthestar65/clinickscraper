@@ -1,0 +1,23 @@
+# Web Framework
+flask==3.0.0
+gunicorn==21.2.0
+
+# Browser Automation
+playwright==1.40.0
+
+# AI API
+anthropic==0.39.0
+
+# Google Sheets
+gspread==6.0.0
+google-auth==2.25.0
+
+# Configuration
+pyyaml==6.0.1
+python-dotenv==1.0.0
+
+# Data Validation
+pydantic==2.5.0
+
+# Retry Logic
+tenacity==8.2.3
