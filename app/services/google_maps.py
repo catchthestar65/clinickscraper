@@ -381,21 +381,22 @@ class GoogleMapsScraper:
         logger.info(f"[EXTRACT][{index}] 開始: '{name}'")
 
         # クリック前のh1を取得（パネル更新検出用）
-        prev_h1 = self._get_text(page, "h1")
-        logger.debug(f"[EXTRACT][{index}] クリック前 h1='{prev_h1}'")
+        # 注: Google Mapsには複数のh1があり、クリニック名はh1.DUwDvfクラスに表示される
+        prev_h1 = self._get_text(page, "h1.DUwDvf")
+        logger.debug(f"[EXTRACT][{index}] クリック前 h1.DUwDvf='{prev_h1}'")
 
         # クリックして詳細パネルを開く（複数の方法を試行）
         click_success = self._click_element_robust(element, page, index, name)
         if not click_success:
             return None
 
-        # パネル更新待機: h1がクリックしたクリニック名に変わるまで待つ
+        # パネル更新待機: h1.DUwDvfがクリックしたクリニック名に変わるまで待つ
         # これにより、URLと名前の不一致を防ぐ
-        max_wait_attempts = 25  # 最大25回 × 0.3秒 = 7.5秒
+        max_wait_attempts = 15  # 最大15回 × 0.2秒 = 3秒（高速化）
         panel_ready = False
 
         for attempt in range(max_wait_attempts):
-            current_h1 = self._get_text(page, "h1")
+            current_h1 = self._get_text(page, "h1.DUwDvf")
 
             # h1がクリックしたクリニック名と一致したらパネル更新完了
             if current_h1 and self._names_match(current_h1, name):
@@ -403,32 +404,32 @@ class GoogleMapsScraper:
                 panel_ready = True
                 break
 
-            # h1が「結果」でなく、かつ前と変わっていれば更新中
-            if current_h1 and current_h1 != "結果" and current_h1 != prev_h1:
+            # h1が前と変わっていれば更新中
+            if current_h1 and current_h1 != prev_h1:
                 # 名前が完全一致しないが変わった場合も確認
                 logger.debug(f"[EXTRACT][{index}] h1変更検出 (attempt={attempt+1}): '{prev_h1}' -> '{current_h1}'")
                 # 追加で少し待って再確認
-                time.sleep(0.3)
-                final_h1 = self._get_text(page, "h1")
+                time.sleep(0.2)
+                final_h1 = self._get_text(page, "h1.DUwDvf")
                 if final_h1 and self._names_match(final_h1, name):
                     logger.debug(f"[EXTRACT][{index}] 最終確認OK: h1='{final_h1}'")
                     panel_ready = True
                     break
 
-            time.sleep(0.3)
+            time.sleep(0.2)
 
         if not panel_ready:
             # タイムアウト - 再クリック試行
-            final_h1 = self._get_text(page, "h1")
+            final_h1 = self._get_text(page, "h1.DUwDvf")
             logger.warning(f"[EXTRACT][{index}] パネル更新タイムアウト: 期待='{name}', 実際h1='{final_h1}'")
 
-            # h1が「結果」のままなら再クリック試行
-            if final_h1 == "結果" or not final_h1:
+            # h1が空なら再クリック試行
+            if not final_h1:
                 logger.info(f"[EXTRACT][{index}] JavaScriptクリックで再試行...")
                 try:
                     element.evaluate("el => el.click()")
-                    time.sleep(1.5)
-                    final_h1 = self._get_text(page, "h1")
+                    time.sleep(1.0)
+                    final_h1 = self._get_text(page, "h1.DUwDvf")
                     if final_h1 and self._names_match(final_h1, name):
                         logger.info(f"[EXTRACT][{index}] 再クリック成功: h1='{final_h1}'")
                         panel_ready = True
@@ -437,16 +438,16 @@ class GoogleMapsScraper:
 
             # 名前が全く違う場合はスキップ（データ不整合を防ぐ）
             if not panel_ready:
-                final_h1 = self._get_text(page, "h1")
-                if final_h1 and final_h1 != "結果" and not self._names_match(final_h1, name):
+                final_h1 = self._get_text(page, "h1.DUwDvf")
+                if final_h1 and not self._names_match(final_h1, name):
                     logger.warning(f"[EXTRACT][{index}] 名前不一致のためスキップ: h1='{final_h1}'")
                     return None
                 # それ以外は追加待機して続行（部分データでも収集）
                 logger.info(f"[EXTRACT][{index}] パネル未確認だがデータ収集を試行")
-                time.sleep(1.0)
+                time.sleep(0.5)
 
         # データ取得前の追加安定化待機
-        time.sleep(0.5)
+        time.sleep(0.3)
 
         # 公式サイトURL取得
         url = self._get_website_url(page)
