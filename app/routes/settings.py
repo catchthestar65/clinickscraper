@@ -19,6 +19,7 @@ def get_settings() -> ResponseReturnValue:
         {
             "project_name": config.project_name,
             "search_suffix": config.search_suffix,
+            "max_regions_per_batch": config.max_regions_per_batch,
             "exclusion_keywords": config.exclusion_keywords,
             "google_sheets": {
                 "spreadsheet_id": config.google_sheets_id,

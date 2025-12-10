@@ -11,6 +11,7 @@ from flask import Blueprint, request, jsonify, Response
 from flask.typing import ResponseReturnValue
 from pydantic import ValidationError as PydanticValidationError
 
+from app.config import config
 from app.models.clinic import ScrapeRequest
 from app.services.google_maps import GoogleMapsScraper
 from app.services.exclusion_filter import ExclusionFilter
@@ -19,6 +20,9 @@ from app.services.sheets_writer import SheetsWriter
 from app.exceptions import ScrapingError, SheetsError
 
 logger = logging.getLogger(__name__)
+
+# 最大地域数制限
+MAX_REGIONS_PER_BATCH = config.max_regions_per_batch
 bp = Blueprint("scrape", __name__, url_prefix="/api")
 
 
@@ -68,6 +72,16 @@ def scrape() -> ResponseReturnValue:
         scrape_request = ScrapeRequest(**data)
     except PydanticValidationError as e:
         return jsonify({"success": False, "error": str(e)}), 400
+
+    # バッチサイズ制限チェック
+    if len(scrape_request.regions) > MAX_REGIONS_PER_BATCH:
+        return jsonify({
+            "success": False,
+            "error": f"一度に処理できる地域数は最大{MAX_REGIONS_PER_BATCH}件です。"
+                     f"選択された{len(scrape_request.regions)}件を{MAX_REGIONS_PER_BATCH}件以下に分割してください。",
+            "max_regions": MAX_REGIONS_PER_BATCH,
+            "requested_regions": len(scrape_request.regions),
+        }), 400
 
     def generate() -> Generator[str, None, None]:
         session_start = time.time()

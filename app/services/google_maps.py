@@ -375,17 +375,14 @@ class GoogleMapsScraper:
         prev_h1 = self._get_text(page, "h1")
         logger.debug(f"[EXTRACT][{index}] クリック前 h1='{prev_h1}'")
 
-        # クリックして詳細パネルを開く
-        try:
-            element.click()
-            logger.debug(f"[EXTRACT][{index}] クリック実行")
-        except Exception as e:
-            logger.warning(f"[EXTRACT][{index}] クリック失敗: {type(e).__name__}: {e}")
+        # クリックして詳細パネルを開く（複数の方法を試行）
+        click_success = self._click_element_robust(element, page, index, name)
+        if not click_success:
             return None
 
         # パネル更新待機: h1がクリックしたクリニック名に変わるまで待つ
         # これにより、URLと名前の不一致を防ぐ
-        max_wait_attempts = 20  # 最大20回 × 0.3秒 = 6秒
+        max_wait_attempts = 25  # 最大25回 × 0.3秒 = 7.5秒
         panel_ready = False
 
         for attempt in range(max_wait_attempts):
@@ -412,15 +409,32 @@ class GoogleMapsScraper:
             time.sleep(0.3)
 
         if not panel_ready:
-            # タイムアウト - 現在のh1をログ出力
+            # タイムアウト - 再クリック試行
             final_h1 = self._get_text(page, "h1")
             logger.warning(f"[EXTRACT][{index}] パネル更新タイムアウト: 期待='{name}', 実際h1='{final_h1}'")
+
+            # h1が「結果」のままなら再クリック試行
+            if final_h1 == "結果" or not final_h1:
+                logger.info(f"[EXTRACT][{index}] JavaScriptクリックで再試行...")
+                try:
+                    element.evaluate("el => el.click()")
+                    time.sleep(1.5)
+                    final_h1 = self._get_text(page, "h1")
+                    if final_h1 and self._names_match(final_h1, name):
+                        logger.info(f"[EXTRACT][{index}] 再クリック成功: h1='{final_h1}'")
+                        panel_ready = True
+                except Exception as e:
+                    logger.debug(f"[EXTRACT][{index}] 再クリック失敗: {e}")
+
             # 名前が全く違う場合はスキップ（データ不整合を防ぐ）
-            if final_h1 and final_h1 != "結果" and not self._names_match(final_h1, name):
-                logger.warning(f"[EXTRACT][{index}] 名前不一致のためスキップ")
-                return None
-            # それ以外は追加待機して続行
-            time.sleep(1.0)
+            if not panel_ready:
+                final_h1 = self._get_text(page, "h1")
+                if final_h1 and final_h1 != "結果" and not self._names_match(final_h1, name):
+                    logger.warning(f"[EXTRACT][{index}] 名前不一致のためスキップ: h1='{final_h1}'")
+                    return None
+                # それ以外は追加待機して続行（部分データでも収集）
+                logger.info(f"[EXTRACT][{index}] パネル未確認だがデータ収集を試行")
+                time.sleep(1.0)
 
         # データ取得前の追加安定化待機
         time.sleep(0.5)
@@ -463,6 +477,83 @@ class GoogleMapsScraper:
         except Exception as e:
             logger.warning(f"[EXTRACT][{index}] Clinicオブジェクト作成失敗: {e}")
             return None
+
+    def _click_element_robust(
+        self, element: Any, page: Page, index: int, name: str
+    ) -> bool:
+        """
+        要素を確実にクリックする（複数の方法を試行）
+
+        Args:
+            element: クリック対象の要素
+            page: Playwrightページ
+            index: 結果インデックス
+            name: クリニック名（ログ用）
+
+        Returns:
+            クリック成功したかどうか
+        """
+        # 方法1: 要素をビューポートにスクロールしてからクリック
+        try:
+            element.scroll_into_view_if_needed()
+            time.sleep(0.2)
+            logger.debug(f"[EXTRACT][{index}] スクロール完了")
+        except Exception as e:
+            logger.debug(f"[EXTRACT][{index}] スクロール失敗: {e}")
+
+        # 方法2: 通常のクリック
+        try:
+            element.click(timeout=5000)
+            logger.debug(f"[EXTRACT][{index}] 通常クリック成功")
+            return True
+        except Exception as e:
+            logger.debug(f"[EXTRACT][{index}] 通常クリック失敗: {type(e).__name__}: {e}")
+
+        # 方法3: force=Trueでクリック（アクション可能性チェックをスキップ）
+        try:
+            element.click(force=True, timeout=5000)
+            logger.debug(f"[EXTRACT][{index}] 強制クリック成功")
+            return True
+        except Exception as e:
+            logger.debug(f"[EXTRACT][{index}] 強制クリック失敗: {type(e).__name__}: {e}")
+
+        # 方法4: JavaScriptでクリック
+        try:
+            element.evaluate("el => el.click()")
+            logger.debug(f"[EXTRACT][{index}] JSクリック成功")
+            return True
+        except Exception as e:
+            logger.debug(f"[EXTRACT][{index}] JSクリック失敗: {type(e).__name__}: {e}")
+
+        # 方法5: dispatchEventでクリックイベントを発火
+        try:
+            element.evaluate("""el => {
+                const event = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                });
+                el.dispatchEvent(event);
+            }""")
+            logger.debug(f"[EXTRACT][{index}] イベント発火成功")
+            return True
+        except Exception as e:
+            logger.debug(f"[EXTRACT][{index}] イベント発火失敗: {type(e).__name__}: {e}")
+
+        # 方法6: 要素の中央座標を取得してpage.click
+        try:
+            box = element.bounding_box()
+            if box:
+                x = box["x"] + box["width"] / 2
+                y = box["y"] + box["height"] / 2
+                page.mouse.click(x, y)
+                logger.debug(f"[EXTRACT][{index}] 座標クリック成功: ({x}, {y})")
+                return True
+        except Exception as e:
+            logger.debug(f"[EXTRACT][{index}] 座標クリック失敗: {type(e).__name__}: {e}")
+
+        logger.warning(f"[EXTRACT][{index}] 全クリック方法失敗: '{name}'")
+        return False
 
     def _names_match(self, h1_name: str, aria_label_name: str) -> bool:
         """

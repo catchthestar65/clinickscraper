@@ -125,6 +125,10 @@ class Config:
         return self._default_config.get("scraping", {}).get("max_results_per_query", 50)
 
     @property
+    def max_regions_per_batch(self) -> int:
+        return self._default_config.get("scraping", {}).get("max_regions_per_batch", 20)
+
+    @property
     def claude_model(self) -> str:
         return self._default_config.get("claude", {}).get(
             "model", "claude-sonnet-4-20250514"

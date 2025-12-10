@@ -58,5 +58,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # gunicornで起動（メモリ最適化）
 # - workers=1: メモリ節約（512MB制限対応）
-# - timeout=600: 長時間スクレイピング対応（10分）
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--graceful-timeout", "600", "--workers", "1", "app.main:app"]
+# - timeout=900: 長時間スクレイピング対応（15分、最大20地域に対応）
+# - keep-alive=30: SSE接続維持用
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "900", "--graceful-timeout", "120", "--keep-alive", "30", "--workers", "1", "app.main:app"]

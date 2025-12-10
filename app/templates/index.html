@@ -24,7 +24,7 @@
         <div class="bg-white rounded-lg shadow p-6 mb-6">
             <div class="mb-4">
                 <label class="block text-gray-700 font-medium mb-2">
-                    検索地域（カンマ区切りで複数入力可）
+                    検索地域（カンマ区切りで複数入力可、最大<span x-text="maxRegions"></span>件）
                 </label>
                 <input
                     type="text"
@@ -176,6 +176,7 @@
             return {
                 regions: '',
                 searchSuffix: 'AGA',
+                maxRegions: 20,
                 isRunning: false,
                 logs: [],
                 results: [],
@@ -192,6 +193,7 @@
                         const res = await fetch('/api/settings/');
                         const settings = await res.json();
                         this.searchSuffix = settings.search_suffix || 'AGA';
+                        this.maxRegions = settings.max_regions_per_batch || 20;
                         if (settings.google_sheets?.spreadsheet_id) {
                             this.sheetsUrl = `https://docs.google.com/spreadsheets/d/${settings.google_sheets.spreadsheet_id}`;
                         }
@@ -218,6 +220,17 @@
                         return;
                     }
 
+                    const regionList = this.regions
+                        .split(/[,、]/)
+                        .map(r => r.trim())
+                        .filter(r => r);
+
+                    // フロントエンドでも地域数チェック
+                    if (regionList.length > this.maxRegions) {
+                        alert(`一度に処理できる地域数は最大${this.maxRegions}件です。\n${regionList.length}件が選択されています。\n${this.maxRegions}件以下に分割してください。`);
+                        return;
+                    }
+
                     this.isRunning = true;
                     this.logs = [];
                     this.results = [];
@@ -225,12 +238,7 @@
                     this.eventSource = null;
                     this.lastMessageTime = Date.now();
 
-                    const regionList = this.regions
-                        .split(/[,、]/)
-                        .map(r => r.trim())
-                        .filter(r => r);
-
-                    this.addLog(`検索開始: ${regionList.join(', ')}`);
+                    this.addLog(`検索開始: ${regionList.length}件の地域 - ${regionList.join(', ')}`);
 
                     // POSTリクエストでスクレイピング開始し、SSEで結果を受信
                     try {
@@ -244,6 +252,12 @@
                         });
 
                         if (!response.ok) {
+                            // JSONエラーレスポンスを試行
+                            const contentType = response.headers.get('content-type');
+                            if (contentType && contentType.includes('application/json')) {
+                                const errorJson = await response.json();
+                                throw new Error(errorJson.error || 'サーバーエラー');
+                            }
                             const errorText = await response.text();
                             throw new Error(`サーバーエラー: ${response.status} - ${errorText}`);
                         }

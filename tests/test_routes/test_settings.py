@@ -12,6 +12,7 @@ class TestSettingsRoutes:
         with patch("app.routes.settings.config") as mock_config:
             mock_config.project_name = "テストプロジェクト"
             mock_config.search_suffix = "AGA"
+            mock_config.max_regions_per_batch = 20
             mock_config.exclusion_keywords = ["キーワード1"]
             mock_config.google_sheets_id = "test-id"
             mock_config.google_sheets_name = "テストシート"
@@ -22,6 +23,7 @@ class TestSettingsRoutes:
             data = response.get_json()
             assert data["project_name"] == "テストプロジェクト"
             assert data["search_suffix"] == "AGA"
+            assert data["max_regions_per_batch"] == 20
             assert "キーワード1" in data["exclusion_keywords"]
 
     def test_update_settings(self, client):
