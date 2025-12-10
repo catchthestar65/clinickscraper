@@ -56,5 +56,9 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://localhost:5000/health || exit 1
 
-# gunicornで起動（タイムアウト延長：スクレイピングに時間がかかるため）
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "--workers", "2", "--threads", "4", "app.main:app"]
+# gunicornで起動（Playwright用に最適化）
+# - workers=1: Playwrightはシングルワーカーで安定動作
+# - threads削除: asyncio競合を回避
+# - timeout=600: 長時間スクレイピング対応（10分）
+# - graceful-timeout=600: 正常終了待機時間
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "600", "--graceful-timeout", "600", "--workers", "1", "app.main:app"]
