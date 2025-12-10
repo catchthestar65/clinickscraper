@@ -55,19 +55,32 @@ def scrape() -> ResponseReturnValue:
             validator = ClaudeValidator()
             sheets_writer = SheetsWriter()
 
-            all_clinics = []
+            all_valid_clinics = []
+            total_found = 0
             total_excluded = 0
+            total_new = 0
 
-            # 各地域を検索
-            for region in scrape_request.regions:
+            # 各地域を検索（地域ごとに即時Sheets書き込み）
+            for i, region in enumerate(scrape_request.regions):
                 query = f"{region} {scrape_request.search_suffix}"
-                yield _create_sse_message("log", message=f"{query} で検索開始...")
+                yield _create_sse_message(
+                    "log",
+                    message=f"[{i+1}/{len(scrape_request.regions)}] {query} で検索開始...",
+                )
 
                 try:
                     clinics = scraper.search(query)
                     yield _create_sse_message(
                         "log", message=f"{len(clinics)}件取得"
                     )
+
+                    if not clinics:
+                        yield _create_sse_message(
+                            "log", message="→ スキップ（0件）"
+                        )
+                        continue
+
+                    total_found += len(clinics)
 
                     # キーワード除外
                     filtered = exclusion_filter.filter(clinics)
@@ -79,7 +92,46 @@ def scrape() -> ResponseReturnValue:
                             "log", message=f"キーワード除外: {excluded_count}件"
                         )
 
-                    all_clinics.extend(filtered)
+                    if not filtered:
+                        yield _create_sse_message(
+                            "log", message="→ スキップ（有効0件）"
+                        )
+                        continue
+
+                    # Claude API検証（地域ごと）
+                    yield _create_sse_message(
+                        "log", message=f"Claude APIで検証中..."
+                    )
+                    validated = validator.validate_batch(filtered)
+                    valid_clinics = [c for c in validated if c.get("is_valid", False)]
+
+                    yield _create_sse_message(
+                        "log", message=f"有効クリニック: {len(valid_clinics)}件"
+                    )
+
+                    if not valid_clinics:
+                        yield _create_sse_message(
+                            "log", message="→ スキップ（検証後0件）"
+                        )
+                        continue
+
+                    # Google Sheets書き込み（地域ごとに即時保存）
+                    try:
+                        new_count = sheets_writer.append(valid_clinics)
+                        total_new += new_count
+                        yield _create_sse_message(
+                            "log",
+                            message=f"→ Sheets保存: {new_count}件（累計: {total_new}件）",
+                        )
+                        all_valid_clinics.extend(valid_clinics)
+                    except SheetsError as e:
+                        yield _create_sse_message(
+                            "log", message=f"Sheets書き込みエラー: {e.message}"
+                        )
+                    except Exception as e:
+                        yield _create_sse_message(
+                            "log", message=f"Sheets書き込みエラー: {str(e)}"
+                        )
 
                 except ScrapingError as e:
                     yield _create_sse_message(
@@ -87,58 +139,13 @@ def scrape() -> ResponseReturnValue:
                     )
                     continue
 
-            if not all_clinics:
-                yield _create_sse_message(
-                    "complete",
-                    clinics=[],
-                    total_found=0,
-                    valid_count=0,
-                    excluded_count=total_excluded,
-                    new_count=0,
-                )
-                return
-
-            yield _create_sse_message(
-                "log", message=f"合計 {len(all_clinics)}件のクリニックを取得"
-            )
-
-            # Claude API検証
-            yield _create_sse_message("log", message="Claude APIで検証中...")
-
-            validated = validator.validate_batch(all_clinics)
-            valid_clinics = [c for c in validated if c.get("is_valid", False)]
-
-            yield _create_sse_message(
-                "log", message=f"有効クリニック: {len(valid_clinics)}件"
-            )
-
-            # Google Sheets書き込み
-            new_count = 0
-            if valid_clinics:
-                try:
-                    yield _create_sse_message(
-                        "log", message="Google Sheetsに書き込み中..."
-                    )
-                    new_count = sheets_writer.append(valid_clinics)
-                    yield _create_sse_message(
-                        "log", message=f"新規追加: {new_count}件（重複除く）"
-                    )
-                except SheetsError as e:
-                    yield _create_sse_message(
-                        "log", message=f"Sheets書き込みエラー: {e.message}"
-                    )
-                except Exception as e:
-                    yield _create_sse_message(
-                        "log", message=f"Sheets書き込みエラー: {str(e)}"
-                    )
-
             yield _create_sse_message(
                 "complete",
-                clinics=valid_clinics,
-                total_found=len(all_clinics) + total_excluded,
-                valid_count=len(valid_clinics),
+                clinics=all_valid_clinics,
+                total_found=total_found,
+                valid_count=len(all_valid_clinics),
                 excluded_count=total_excluded,
-                new_count=new_count,
+                new_count=total_new,
             )
 
         except Exception as e:

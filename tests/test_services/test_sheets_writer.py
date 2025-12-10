@@ -68,8 +68,10 @@ class TestSheetsWriter:
         mock_spreadsheet = MagicMock()
         mock_sheet = MagicMock()
 
-        # 既存データなし
-        mock_sheet.get_all_records.return_value = []
+        # 既存データなし（ヘッダー行のみ）
+        mock_sheet.get_all_values.return_value = [
+            ["No.", "クリニック名", "公式サイトURL"]
+        ]
         mock_sheet.row_count = 1
 
         mock_spreadsheet.worksheet.return_value = mock_sheet
@@ -90,7 +92,7 @@ class TestSheetsWriter:
             count = writer.append(clinics)
 
             assert count == 1
-            mock_sheet.append_rows.assert_called_once()
+            mock_sheet.update.assert_called_once()
 
     def test_append_duplicate_url(self, writer, mock_config):
         """URL重複時の追記"""
@@ -98,9 +100,10 @@ class TestSheetsWriter:
         mock_spreadsheet = MagicMock()
         mock_sheet = MagicMock()
 
-        # 既存データにURLあり
-        mock_sheet.get_all_records.return_value = [
-            {"公式サイトURL": "https://existing.com", "電話番号": "03-0000-0000"}
+        # 既存データにURLあり（get_all_valuesはリストのリストを返す）
+        mock_sheet.get_all_values.return_value = [
+            ["No.", "クリニック名", "公式サイトURL"],  # ヘッダー行
+            ["1", "既存クリニック", "https://existing.com"],  # データ行
         ]
         mock_sheet.row_count = 2
 
@@ -124,17 +127,18 @@ class TestSheetsWriter:
             count = writer.append(clinics)
 
             assert count == 1  # 重複を除いた1件のみ追加
+            mock_sheet.update.assert_called_once()
 
-    def test_append_duplicate_phone(self, writer, mock_config):
-        """電話番号重複時の追記"""
+    def test_append_skip_no_url(self, writer, mock_config):
+        """URLがないクリニックはスキップ"""
         mock_client = MagicMock()
         mock_spreadsheet = MagicMock()
         mock_sheet = MagicMock()
 
-        mock_sheet.get_all_records.return_value = [
-            {"公式サイトURL": "", "電話番号": "03-1234-5678"}
+        mock_sheet.get_all_values.return_value = [
+            ["No.", "クリニック名", "公式サイトURL"],  # ヘッダー行のみ
         ]
-        mock_sheet.row_count = 2
+        mock_sheet.row_count = 1
 
         mock_spreadsheet.worksheet.return_value = mock_sheet
         mock_client.open_by_key.return_value = mock_spreadsheet
@@ -142,16 +146,21 @@ class TestSheetsWriter:
         with patch.object(writer, "_get_client", return_value=mock_client):
             clinics = [
                 {
-                    "name": "テストクリニック",
-                    "url": "https://test.com",
-                    "phone": "03-1234-5678",  # 重複電話番号
+                    "name": "URLなしクリニック",
+                    "url": "",  # URLなし
                     "area": "新宿区",
-                }
+                },
+                {
+                    "name": "URLありクリニック",
+                    "url": "https://test.com",
+                    "area": "渋谷区",
+                },
             ]
 
             count = writer.append(clinics)
 
-            assert count == 0  # 重複のため追加なし
+            assert count == 1  # URLありの1件のみ追加
+            mock_sheet.update.assert_called_once()
 
     def test_get_existing_count(self, writer, mock_config):
         """既存レコード数取得"""

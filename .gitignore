@@ -77,3 +77,6 @@ credentials.json
 
 # Claude settings (keep only local)
 .claude/settings.local.json
+
+# Debug screenshots
+debug_screenshot*.png

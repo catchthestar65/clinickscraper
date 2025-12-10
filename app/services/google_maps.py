@@ -74,26 +74,44 @@ class GoogleMapsScraper:
             try:
                 # Google Maps検索
                 search_url = f"{self.BASE_URL}{query.replace(' ', '+')}"
-                page.goto(search_url, wait_until="networkidle", timeout=60000)
+                page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+
+                # ページが完全に読み込まれるまで待機
+                page.wait_for_timeout(3000)
 
                 # クッキー同意ダイアログがあれば閉じる
                 self._handle_consent_dialog(page)
 
-                # 検索結果のスクロールで全件読み込み
-                self._scroll_results(page, max_results)
+                # 単一結果ページかどうかをチェック
+                # （feedがない && h1が「結果」でない場合は単一結果）
+                feed = page.query_selector('[role="feed"]')
+                h1_el = page.query_selector("h1")
+                h1_text = h1_el.inner_text() if h1_el else ""
 
-                # 各クリニックの情報を取得
-                results = page.query_selector_all('[data-result-index]')
-                logger.info(f"Found {len(results)} results")
+                if not feed and h1_text and h1_text != "結果":
+                    # 単一結果ページ: 詳細パネルから直接取得
+                    logger.info(f"Single result page detected: {h1_text}")
+                    clinic = self._extract_single_result(page, h1_text)
+                    if clinic:
+                        clinics.append(clinic)
+                else:
+                    # 複数結果ページ: 通常のスクロール処理
+                    # 検索結果のスクロールで全件読み込み
+                    self._scroll_results(page, max_results)
 
-                for i, result in enumerate(results[:max_results]):
-                    try:
-                        clinic = self._extract_clinic_info(result, page, i)
-                        if clinic:
-                            clinics.append(clinic)
-                    except Exception as e:
-                        logger.warning(f"Error extracting clinic {i}: {e}")
-                        continue
+                    # 各クリニックの情報を取得
+                    # Google Mapsの検索結果リンクを取得
+                    results = page.query_selector_all('a[href*="/maps/place/"]')
+                    logger.info(f"Found {len(results)} results")
+
+                    for i, result in enumerate(results[:max_results]):
+                        try:
+                            clinic = self._extract_clinic_info(result, page, i)
+                            if clinic:
+                                clinics.append(clinic)
+                        except Exception as e:
+                            logger.warning(f"Error extracting clinic {i}: {e}")
+                            continue
 
             except Exception as e:
                 logger.error(f"Search error: {e}")
@@ -114,6 +132,65 @@ class GoogleMapsScraper:
         except Exception:
             pass  # ダイアログがなければスキップ
 
+    def _extract_single_result(self, page: Page, name: str) -> Clinic | None:
+        """
+        単一結果ページからクリニック情報を抽出
+
+        Args:
+            page: Playwrightページ
+            name: h1から取得したクリニック名
+
+        Returns:
+            Clinicオブジェクト、抽出失敗時はNone
+        """
+        logger.debug(f"Extracting single result: {name}")
+
+        # 公式サイトURL（単一結果ページでは異なるセレクタの可能性）
+        url = self._get_website_url(page)
+
+        # 代替: リンクテキストから取得
+        if not url:
+            website_link = page.query_selector('a[data-item-id="authority"]')
+            if website_link:
+                url = website_link.get_attribute("href")
+
+        # 住所
+        address = self._get_text(page, '[data-item-id="address"] .fontBodyMedium')
+        # 代替セレクタ
+        if not address:
+            address_el = page.query_selector('button[data-item-id="address"]')
+            if address_el:
+                address = address_el.inner_text()
+
+        # 電話番号
+        phone = self._get_phone(page)
+
+        # 評価
+        rating = self._get_rating(page)
+
+        # 口コミ数
+        reviews = self._get_reviews(page)
+
+        # 所在地（区）を抽出
+        area = self._extract_area(address)
+
+        logger.info(f"Extracted single result: name={name}, url={url}, area={area}")
+
+        try:
+            clinic = Clinic(
+                name=name,
+                url=url,
+                address=address,
+                phone=phone,
+                rating=rating,
+                reviews=reviews,
+                area=area,
+            )
+            return clinic
+        except Exception as e:
+            logger.warning(f"Failed to create Clinic object for single result: {e}")
+            return None
+
     def _scroll_results(self, page: Page, max_results: int) -> None:
         """検索結果をスクロールして全件読み込み"""
         results_container = page.query_selector('[role="feed"]')
@@ -126,7 +203,7 @@ class GoogleMapsScraper:
         max_attempts = 30
 
         while scroll_attempts < max_attempts:
-            results = page.query_selector_all('[data-result-index]')
+            results = page.query_selector_all('a[href*="/maps/place/"]')
             current_count = len(results)
 
             if current_count >= max_results:
@@ -170,19 +247,59 @@ class GoogleMapsScraper:
         Returns:
             Clinicオブジェクト、抽出失敗時はNone
         """
+        # aria-label属性からクリニック名を取得（h1は信頼できない）
+        name = element.get_attribute("aria-label")
+        if not name:
+            logger.debug(f"[{index}] No aria-label found, skipping")
+            return None
+
+        logger.debug(f"[{index}] Clinic name from aria-label: '{name}'")
+
+        # クリック前の現在のパネル情報を取得（パネル更新検出用）
+        prev_url = self._get_website_url(page)
+        prev_address = self._get_text(page, '[data-item-id="address"] .fontBodyMedium')
+        prev_phone = self._get_phone(page)
+
         # クリックして詳細パネルを開く
         try:
             element.click()
-            time.sleep(1.5)
         except Exception as e:
             logger.debug(f"Click failed for element {index}: {e}")
             return None
 
-        # クリニック名
-        name = self._get_text(page, "h1")
-        if not name:
-            logger.debug(f"No name found for element {index}")
-            return None
+        # クリック直後に最低限の待機（パネル更新開始を待つ）
+        time.sleep(1.0)
+
+        # 詳細パネルが更新されるまで待機
+        # URL、住所、電話番号のいずれかが変わるまで待つ
+        max_wait = 8  # 最大8回 × 0.5秒 = 4秒（+ 初期1秒 = 合計5秒）
+        panel_updated = False
+        for attempt in range(max_wait):
+            current_url = self._get_website_url(page)
+            current_address = self._get_text(page, '[data-item-id="address"] .fontBodyMedium')
+            current_phone = self._get_phone(page)
+
+            # URL、住所、電話番号のいずれかが変わった場合、パネルが更新された
+            if (current_url != prev_url or
+                current_address != prev_address or
+                current_phone != prev_phone):
+                logger.debug(f"[{index}] Panel updated at attempt {attempt + 1}")
+                panel_updated = True
+                break
+
+            # 最初のクリニック（全てNone）の場合はデータが表示されたら終了
+            if prev_url is None and prev_address is None and prev_phone is None:
+                if current_url or current_address or current_phone:
+                    logger.debug(f"[{index}] First panel loaded at attempt {attempt + 1}")
+                    panel_updated = True
+                    break
+
+            time.sleep(0.5)
+
+        if not panel_updated:
+            # タイムアウト - 追加で待って強制的に進む
+            logger.debug(f"[{index}] Panel update timeout, waiting additional time")
+            time.sleep(1.5)
 
         # 公式サイトURL
         url = self._get_website_url(page)
@@ -202,6 +319,9 @@ class GoogleMapsScraper:
         # 所在地（区）を抽出
         area = self._extract_area(address)
 
+        # 詳細ログ出力
+        logger.info(f"Extracted [{index}]: name={name}, url={url}, area={area}")
+
         try:
             clinic = Clinic(
                 name=name,
@@ -212,7 +332,6 @@ class GoogleMapsScraper:
                 reviews=reviews,
                 area=area,
             )
-            logger.debug(f"Extracted: {name}")
             return clinic
         except Exception as e:
             logger.warning(f"Failed to create Clinic object: {e}")

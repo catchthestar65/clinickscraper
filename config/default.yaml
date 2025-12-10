@@ -11,7 +11,7 @@ scraping:
   page_load_timeout_seconds: 60
 
 claude:
-  model: "claude-sonnet-4-20250514"
+  model: "claude-sonnet-4-5"
   batch_size: 10
   max_tokens: 4096
 
@@ -22,9 +22,6 @@ output_columns:
   - "問い合わせフォームURL\nor\nメールアドレス"
   - "お知らせ/ブログURL"
   - "所在地（区）"
-  - "電話番号"
-  - "評価"
-  - "口コミ数"
   - "ステータス"
   - "初回送信日"
   - "フォロー1回目"

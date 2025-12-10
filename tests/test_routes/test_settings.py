@@ -48,7 +48,11 @@ class TestSettingsRoutes:
 
     def test_update_settings_no_data(self, client):
         """データなしでの設定更新"""
-        response = client.post("/api/settings/", json=None)
+        response = client.post(
+            "/api/settings/",
+            data="",
+            content_type="application/json",
+        )
 
         assert response.status_code == 400
 
