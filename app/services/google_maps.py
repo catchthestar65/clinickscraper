@@ -3,6 +3,7 @@
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Generator, Any
 
@@ -14,6 +15,9 @@ from app.exceptions import ScrapingError
 from app.models.clinic import Clinic
 
 logger = logging.getLogger(__name__)
+
+# グローバルスレッドプール（Playwrightをasyncioループ外で実行）
+_executor = ThreadPoolExecutor(max_workers=2)
 
 
 class GoogleMapsScraper:
@@ -57,6 +61,7 @@ class GoogleMapsScraper:
     def search(self, query: str, max_results: int | None = None) -> list[Clinic]:
         """
         検索クエリでGoogle Mapsを検索し、クリニック情報を取得
+        （ThreadPoolExecutor経由でasyncioループ外で実行）
 
         Args:
             query: 検索クエリ（例: "新宿 AGA"）
@@ -65,6 +70,12 @@ class GoogleMapsScraper:
         Returns:
             クリニック情報のリスト
         """
+        # ThreadPoolExecutorで別スレッドで実行（asyncioループとの競合を回避）
+        future = _executor.submit(self._search_impl, query, max_results)
+        return future.result()
+
+    def _search_impl(self, query: str, max_results: int | None = None) -> list[Clinic]:
+        """検索の実装（別スレッドで実行）"""
         max_results = max_results or self.max_results
         clinics: list[Clinic] = []
 
