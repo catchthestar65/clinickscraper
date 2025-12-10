@@ -361,80 +361,93 @@ class GoogleMapsScraper:
         Returns:
             Clinicオブジェクト、抽出失敗時はNone
         """
-        # aria-label属性からクリニック名を取得（h1は信頼できない）
+        extract_start = time.time()
+
+        # aria-label属性からクリニック名を取得
         name = element.get_attribute("aria-label")
         if not name:
-            logger.debug(f"[{index}] No aria-label found, skipping")
+            logger.debug(f"[EXTRACT][{index}] aria-labelなし、スキップ")
             return None
 
-        logger.debug(f"[{index}] Clinic name from aria-label: '{name}'")
+        logger.info(f"[EXTRACT][{index}] 開始: '{name}'")
 
-        # クリック前の現在のパネル情報を取得（パネル更新検出用）
-        prev_url = self._get_website_url(page)
-        prev_address = self._get_text(page, '[data-item-id="address"] .fontBodyMedium')
-        prev_phone = self._get_phone(page)
+        # クリック前のh1を取得（パネル更新検出用）
+        prev_h1 = self._get_text(page, "h1")
+        logger.debug(f"[EXTRACT][{index}] クリック前 h1='{prev_h1}'")
 
         # クリックして詳細パネルを開く
         try:
             element.click()
+            logger.debug(f"[EXTRACT][{index}] クリック実行")
         except Exception as e:
-            logger.debug(f"Click failed for element {index}: {e}")
+            logger.warning(f"[EXTRACT][{index}] クリック失敗: {type(e).__name__}: {e}")
             return None
 
-        # クリック直後に最低限の待機（パネル更新開始を待つ）
-        time.sleep(1.0)
+        # パネル更新待機: h1がクリックしたクリニック名に変わるまで待つ
+        # これにより、URLと名前の不一致を防ぐ
+        max_wait_attempts = 20  # 最大20回 × 0.3秒 = 6秒
+        panel_ready = False
 
-        # 詳細パネルが更新されるまで待機
-        # URL、住所、電話番号のいずれかが変わるまで待つ
-        max_wait = 8  # 最大8回 × 0.5秒 = 4秒（+ 初期1秒 = 合計5秒）
-        panel_updated = False
-        for attempt in range(max_wait):
-            current_url = self._get_website_url(page)
-            current_address = self._get_text(page, '[data-item-id="address"] .fontBodyMedium')
-            current_phone = self._get_phone(page)
+        for attempt in range(max_wait_attempts):
+            current_h1 = self._get_text(page, "h1")
 
-            # URL、住所、電話番号のいずれかが変わった場合、パネルが更新された
-            if (current_url != prev_url or
-                current_address != prev_address or
-                current_phone != prev_phone):
-                logger.debug(f"[{index}] Panel updated at attempt {attempt + 1}")
-                panel_updated = True
+            # h1がクリックしたクリニック名と一致したらパネル更新完了
+            if current_h1 and self._names_match(current_h1, name):
+                logger.debug(f"[EXTRACT][{index}] パネル更新確認 (attempt={attempt+1}): h1='{current_h1}'")
+                panel_ready = True
                 break
 
-            # 最初のクリニック（全てNone）の場合はデータが表示されたら終了
-            if prev_url is None and prev_address is None and prev_phone is None:
-                if current_url or current_address or current_phone:
-                    logger.debug(f"[{index}] First panel loaded at attempt {attempt + 1}")
-                    panel_updated = True
+            # h1が「結果」でなく、かつ前と変わっていれば更新中
+            if current_h1 and current_h1 != "結果" and current_h1 != prev_h1:
+                # 名前が完全一致しないが変わった場合も確認
+                logger.debug(f"[EXTRACT][{index}] h1変更検出 (attempt={attempt+1}): '{prev_h1}' -> '{current_h1}'")
+                # 追加で少し待って再確認
+                time.sleep(0.3)
+                final_h1 = self._get_text(page, "h1")
+                if final_h1 and self._names_match(final_h1, name):
+                    logger.debug(f"[EXTRACT][{index}] 最終確認OK: h1='{final_h1}'")
+                    panel_ready = True
                     break
 
-            time.sleep(0.5)
+            time.sleep(0.3)
 
-        if not panel_updated:
-            # タイムアウト - 追加で待って強制的に進む
-            logger.debug(f"[{index}] Panel update timeout, waiting additional time")
-            time.sleep(1.5)
+        if not panel_ready:
+            # タイムアウト - 現在のh1をログ出力
+            final_h1 = self._get_text(page, "h1")
+            logger.warning(f"[EXTRACT][{index}] パネル更新タイムアウト: 期待='{name}', 実際h1='{final_h1}'")
+            # 名前が全く違う場合はスキップ（データ不整合を防ぐ）
+            if final_h1 and final_h1 != "結果" and not self._names_match(final_h1, name):
+                logger.warning(f"[EXTRACT][{index}] 名前不一致のためスキップ")
+                return None
+            # それ以外は追加待機して続行
+            time.sleep(1.0)
 
-        # 公式サイトURL
+        # データ取得前の追加安定化待機
+        time.sleep(0.5)
+
+        # 公式サイトURL取得
         url = self._get_website_url(page)
+        logger.debug(f"[EXTRACT][{index}] URL取得: {url}")
 
-        # 住所
+        # 住所取得
         address = self._get_text(page, '[data-item-id="address"] .fontBodyMedium')
+        logger.debug(f"[EXTRACT][{index}] 住所取得: {address}")
 
-        # 電話番号
+        # 電話番号取得
         phone = self._get_phone(page)
+        logger.debug(f"[EXTRACT][{index}] 電話番号取得: {phone}")
 
-        # 評価
+        # 評価取得
         rating = self._get_rating(page)
 
-        # 口コミ数
+        # 口コミ数取得
         reviews = self._get_reviews(page)
 
         # 所在地（区）を抽出
         area = self._extract_area(address)
 
-        # 詳細ログ出力
-        logger.info(f"Extracted [{index}]: name={name}, url={url}, area={area}")
+        extract_elapsed = time.time() - extract_start
+        logger.info(f"[EXTRACT][{index}] 完了 ({extract_elapsed:.2f}秒): name='{name}', url={url}, area={area}")
 
         try:
             clinic = Clinic(
@@ -448,8 +461,41 @@ class GoogleMapsScraper:
             )
             return clinic
         except Exception as e:
-            logger.warning(f"Failed to create Clinic object: {e}")
+            logger.warning(f"[EXTRACT][{index}] Clinicオブジェクト作成失敗: {e}")
             return None
+
+    def _names_match(self, h1_name: str, aria_label_name: str) -> bool:
+        """
+        h1のクリニック名とaria-labelの名前が一致するか判定
+
+        Google Mapsではh1とaria-labelで微妙に表記が異なることがあるため、
+        部分一致や正規化して比較する
+        """
+        if not h1_name or not aria_label_name:
+            return False
+
+        # 完全一致
+        if h1_name == aria_label_name:
+            return True
+
+        # 空白・全角半角の正規化
+        h1_normalized = h1_name.replace(" ", "").replace("　", "").lower()
+        aria_normalized = aria_label_name.replace(" ", "").replace("　", "").lower()
+
+        # 正規化後の完全一致
+        if h1_normalized == aria_normalized:
+            return True
+
+        # 部分一致（h1がaria-labelに含まれる、またはその逆）
+        if h1_normalized in aria_normalized or aria_normalized in h1_normalized:
+            return True
+
+        # 先頭N文字が一致（長い名前の場合のトリミング対策）
+        min_len = min(len(h1_normalized), len(aria_normalized))
+        if min_len >= 5 and h1_normalized[:min_len] == aria_normalized[:min_len]:
+            return True
+
+        return False
 
     def _get_text(self, page: Page, selector: str) -> str | None:
         """セレクタからテキストを取得"""

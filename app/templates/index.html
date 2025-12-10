@@ -222,6 +222,8 @@
                     this.logs = [];
                     this.results = [];
                     this.stats = { totalFound: 0, validCount: 0, excludedCount: 0, newCount: 0 };
+                    this.eventSource = null;
+                    this.lastMessageTime = Date.now();
 
                     const regionList = this.regions
                         .split(/[,、]/)
@@ -230,6 +232,7 @@
 
                     this.addLog(`検索開始: ${regionList.join(', ')}`);
 
+                    // POSTリクエストでスクレイピング開始し、SSEで結果を受信
                     try {
                         const response = await fetch('/api/scrape', {
                             method: 'POST',
@@ -240,33 +243,94 @@
                             })
                         });
 
+                        if (!response.ok) {
+                            const errorText = await response.text();
+                            throw new Error(`サーバーエラー: ${response.status} - ${errorText}`);
+                        }
+
                         const reader = response.body.getReader();
                         const decoder = new TextDecoder();
                         let buffer = '';
+                        let completed = false;
 
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
+                        // タイムアウト監視（10分 = 600秒）
+                        const timeoutMs = 600000;
+                        const timeoutId = setTimeout(() => {
+                            if (!completed && this.isRunning) {
+                                this.addLog('[WARN] 接続タイムアウト（10分）');
+                                this.isRunning = false;
+                            }
+                        }, timeoutMs);
 
-                            buffer += decoder.decode(value, { stream: true });
-                            const lines = buffer.split('\n');
-                            buffer = lines.pop() || '';
+                        // キープアライブ監視（120秒間データなしで警告）
+                        const keepAliveCheck = setInterval(() => {
+                            const elapsed = Date.now() - this.lastMessageTime;
+                            if (elapsed > 120000 && this.isRunning) {
+                                this.addLog(`[INFO] 処理継続中... (${Math.floor(elapsed/1000)}秒経過)`);
+                            }
+                        }, 30000);
 
-                            for (const line of lines) {
-                                if (line.startsWith('data: ')) {
-                                    try {
-                                        const data = JSON.parse(line.slice(6));
-                                        this.handleSSEMessage(data);
-                                    } catch (e) {
-                                        console.error('Parse error:', e);
+                        try {
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) {
+                                    this.addLog('[DEBUG] ストリーム終了');
+                                    break;
+                                }
+
+                                this.lastMessageTime = Date.now();
+                                buffer += decoder.decode(value, { stream: true });
+                                const lines = buffer.split('\n');
+                                buffer = lines.pop() || '';
+
+                                for (const line of lines) {
+                                    if (line.startsWith('data: ')) {
+                                        try {
+                                            const data = JSON.parse(line.slice(6));
+                                            this.handleSSEMessage(data);
+                                            if (data.type === 'complete' || data.type === 'error') {
+                                                completed = true;
+                                            }
+                                        } catch (e) {
+                                            console.error('Parse error:', e, 'Line:', line);
+                                            this.addLog(`[WARN] メッセージ解析エラー`);
+                                        }
                                     }
                                 }
                             }
+                        } finally {
+                            clearTimeout(timeoutId);
+                            clearInterval(keepAliveCheck);
                         }
+
+                        // 残りバッファを処理
+                        if (buffer.trim()) {
+                            const remaining = buffer.trim();
+                            if (remaining.startsWith('data: ')) {
+                                try {
+                                    const data = JSON.parse(remaining.slice(6));
+                                    this.handleSSEMessage(data);
+                                } catch (e) {
+                                    console.error('Final buffer parse error:', e);
+                                }
+                            }
+                        }
+
+                        if (!completed) {
+                            this.addLog('[WARN] 完了メッセージを受信せずに接続が終了しました');
+                        }
+
                     } catch (error) {
-                        this.addLog(`[ERROR] ${error.message}`);
+                        console.error('Scraping error:', error);
+                        if (error.name === 'TypeError' && error.message.includes('network')) {
+                            this.addLog(`[ERROR] ネットワーク接続エラー - サーバーとの接続が切断されました`);
+                            this.addLog(`[INFO] サーバーログを確認してください。処理は継続している可能性があります。`);
+                        } else {
+                            this.addLog(`[ERROR] ${error.message || error}`);
+                        }
                     } finally {
                         this.isRunning = false;
+                        this.addLog('[INFO] フロントエンド処理完了');
                     }
                 },
 

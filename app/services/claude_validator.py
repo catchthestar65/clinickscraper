@@ -89,25 +89,35 @@ JSON配列形式で回答してください（コードブロック不要）：
         Returns:
             検証結果を含むクリニック情報のリスト（dict形式）
         """
+        import time
+        start_time = time.time()
+        logger.info(f"[CLAUDE] 検証開始: {len(clinics)}件, モデル={self.model}, バッチサイズ={self.batch_size}")
+
         if not self.client:
-            logger.warning("Claude API client not initialized, skipping validation")
+            logger.warning("[CLAUDE] API client未初期化、検証スキップ")
             return [
                 {**clinic.model_dump(), "is_valid": True, "validation_reason": "API未設定"}
                 for clinic in clinics
             ]
 
         results: list[dict] = []
+        total_batches = (len(clinics) + self.batch_size - 1) // self.batch_size
 
         # バッチに分割して処理
-        for i in range(0, len(clinics), self.batch_size):
+        for batch_num, i in enumerate(range(0, len(clinics), self.batch_size), 1):
             batch = clinics[i : i + self.batch_size]
             batch_start_index = i
 
+            logger.info(f"[CLAUDE] バッチ {batch_num}/{total_batches} 処理中 ({len(batch)}件)...")
+
             try:
+                batch_start = time.time()
                 batch_results = self._validate_batch_internal(batch, batch_start_index)
+                batch_elapsed = time.time() - batch_start
+                logger.info(f"[CLAUDE] バッチ {batch_num}/{total_batches} 完了: {batch_elapsed:.1f}秒")
                 results.extend(batch_results)
             except Exception as e:
-                logger.error(f"Batch validation failed: {e}")
+                logger.error(f"[CLAUDE] バッチ {batch_num} 検証失敗: {type(e).__name__}: {e}")
                 # エラー時は元のデータを返す（手動確認用）
                 for clinic in batch:
                     results.append(
@@ -117,6 +127,10 @@ JSON配列形式で回答してください（コードブロック不要）：
                             "validation_reason": f"API error: {e}",
                         }
                     )
+
+        total_elapsed = time.time() - start_time
+        valid_count = sum(1 for r in results if r.get("is_valid", False))
+        logger.info(f"[CLAUDE] 検証完了: {len(results)}件中 {valid_count}件有効 ({total_elapsed:.1f}秒)")
 
         return results
 

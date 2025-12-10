@@ -78,19 +78,27 @@ class SheetsWriter:
         Returns:
             新規追加された件数
         """
+        import time
+        start_time = time.time()
+        logger.info(f"[SHEETS] 書き込み開始: {len(clinics)}件")
+
         if not self._spreadsheet_id:
             raise ConfigurationError(
                 "GOOGLE_SHEETS_ID is not set",
                 details={"hint": "Set the spreadsheet ID from the URL"},
             )
 
+        logger.debug("[SHEETS] Google Sheets API接続中...")
         client = self._get_client()
         spreadsheet = client.open_by_key(self._spreadsheet_id)
+        logger.debug(f"[SHEETS] スプレッドシート接続完了: {spreadsheet.title}")
 
         try:
             sheet = spreadsheet.worksheet(self._sheet_name)
+            logger.debug(f"[SHEETS] ワークシート取得: {self._sheet_name}")
         except gspread.exceptions.WorksheetNotFound:
             # シートがなければ作成
+            logger.info(f"[SHEETS] ワークシート '{self._sheet_name}' が見つかりません。新規作成します。")
             sheet = spreadsheet.add_worksheet(
                 title=self._sheet_name, rows=1000, cols=20
             )
@@ -98,10 +106,12 @@ class SheetsWriter:
             headers = config.output_columns
             if headers:
                 sheet.append_row(headers)
-            logger.info(f"Created new worksheet: {self._sheet_name}")
+            logger.info(f"[SHEETS] 新規ワークシート作成完了: {self._sheet_name}")
 
         # 既存データ取得（空行を除く）
+        logger.debug("[SHEETS] 既存データ取得中...")
         all_values = sheet.get_all_values()
+        logger.debug(f"[SHEETS] 全行数: {len(all_values)}")
 
         # ヘッダー行をスキップして、実際のデータがある行を取得
         existing_urls: set[str] = set()
@@ -127,25 +137,30 @@ class SheetsWriter:
                 last_data_row = i
                 data_count += 1
 
-        logger.info(f"Found {data_count} existing data rows, last at row {last_data_row}")
+        logger.info(f"[SHEETS] 既存データ: {data_count}件, 最終行: {last_data_row}, 既存URL数: {len(existing_urls)}")
 
         # 次のNo.を計算
         next_no = data_count + 1  # 1から始まる連番
 
         # 新規クリニックのみ抽出
         new_rows: list[list[Any]] = []
+        duplicate_count = 0
+        no_url_count = 0
+
         for clinic in clinics:
             url = clinic.get("url", "")
             name = clinic.get("name", "")
 
             # URLのみで重複チェック（同じクリニック名でも別の院は許可）
             if url and url in existing_urls:
-                logger.debug(f"Duplicate URL: {url}")
+                logger.debug(f"[SHEETS] 重複URL: {name} ({url})")
+                duplicate_count += 1
                 continue
 
             # URLがない場合はスキップ（重複チェックできないため）
             if not url:
-                logger.debug(f"No URL for clinic: {name}, skipping")
+                logger.debug(f"[SHEETS] URL無し: {name}")
+                no_url_count += 1
                 continue
 
             # スプレッドシートのカラム構造に合わせる
@@ -169,18 +184,26 @@ class SheetsWriter:
                 "",  # 備考
             ]
             new_rows.append(row)
+            logger.debug(f"[SHEETS] 新規追加: No.{next_no} {name}")
 
             # 追加したURLを記録（同バッチ内の重複防止）
             existing_urls.add(url)
 
             next_no += 1
 
+        logger.info(f"[SHEETS] フィルタ結果: 新規={len(new_rows)}件, 重複={duplicate_count}件, URL無し={no_url_count}件")
+
         # 一括追加（最後のデータ行の次に挿入）
         if new_rows:
             # 挿入位置を指定して追加
             start_row = last_data_row + 1
+            logger.info(f"[SHEETS] API書き込み中: {len(new_rows)}件 → 行{start_row}から")
             sheet.update(f"A{start_row}", new_rows, value_input_option="USER_ENTERED")
-            logger.info(f"Added {len(new_rows)} new rows to Google Sheets at row {start_row}")
+            elapsed = time.time() - start_time
+            logger.info(f"[SHEETS] 書き込み完了: {len(new_rows)}件追加 ({elapsed:.1f}秒)")
+        else:
+            elapsed = time.time() - start_time
+            logger.info(f"[SHEETS] 書き込み完了: 新規データなし ({elapsed:.1f}秒)")
 
         return len(new_rows)
 

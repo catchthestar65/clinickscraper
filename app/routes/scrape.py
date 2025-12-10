@@ -41,6 +41,11 @@ def _create_sse_message(type_: str, **data) -> str:
     return f"data: {json.dumps(message, ensure_ascii=False)}\n\n"
 
 
+def _create_keepalive() -> str:
+    """SSEキープアライブコメントを作成（接続維持用）"""
+    return ": keepalive\n\n"
+
+
 @bp.route("/scrape", methods=["POST"])
 def scrape() -> ResponseReturnValue:
     """
@@ -66,14 +71,28 @@ def scrape() -> ResponseReturnValue:
 
     def generate() -> Generator[str, None, None]:
         session_start = time.time()
-        logger.info(f"[SESSION] スクレイピング開始: {len(scrape_request.regions)}地域")
-        logger.info(f"[SESSION] メモリ使用量: {_get_memory_mb():.1f} MB")
+        last_keepalive = time.time()
+        keepalive_interval = 15  # 15秒ごとにキープアライブ送信
+
+        logger.info(f"[SESSION] ========== スクレイピングセッション開始 ==========")
+        logger.info(f"[SESSION] 地域数: {len(scrape_request.regions)}")
+        logger.info(f"[SESSION] 地域リスト: {scrape_request.regions}")
+        logger.info(f"[SESSION] 検索キーワード: {scrape_request.search_suffix}")
+        logger.info(f"[SESSION] 開始時メモリ: {_get_memory_mb():.1f} MB")
+
+        # 開始メッセージを即座に送信（接続確認）
+        yield _create_sse_message(
+            "log",
+            message=f"セッション開始 (地域数: {len(scrape_request.regions)})"
+        )
 
         try:
+            logger.info("[SESSION] サービス初期化中...")
             scraper = GoogleMapsScraper()
             exclusion_filter = ExclusionFilter()
             validator = ClaudeValidator()
             sheets_writer = SheetsWriter()
+            logger.info("[SESSION] サービス初期化完了")
 
             all_valid_clinics = []
             total_found = 0
@@ -85,20 +104,29 @@ def scrape() -> ResponseReturnValue:
                 region_start = time.time()
                 query = f"{region} {scrape_request.search_suffix}"
 
-                logger.info(f"[REGION {i+1}/{len(scrape_request.regions)}] 開始: {query}")
+                logger.info(f"[REGION {i+1}/{len(scrape_request.regions)}] ========== 開始: {query} ==========")
                 yield _create_sse_message(
                     "log",
                     message=f"[{i+1}/{len(scrape_request.regions)}] {query} で検索開始...",
                 )
 
                 try:
+                    # キープアライブチェック
+                    if time.time() - last_keepalive > keepalive_interval:
+                        yield _create_keepalive()
+                        last_keepalive = time.time()
+                        logger.debug("[SESSION] キープアライブ送信")
+
+                    logger.info(f"[REGION {i+1}] Google Maps検索開始...")
                     clinics = scraper.search(query)
+                    logger.info(f"[REGION {i+1}] Google Maps検索完了: {len(clinics)}件")
+
                     yield _create_sse_message(
-                        "log", message=f"{len(clinics)}件取得"
+                        "log", message=f"検索結果: {len(clinics)}件取得"
                     )
 
                     if not clinics:
-                        logger.info(f"[REGION {i+1}] 結果0件、スキップ")
+                        logger.info(f"[REGION {i+1}] 結果0件、次の地域へ")
                         yield _create_sse_message(
                             "log", message="→ スキップ（0件）"
                         )
@@ -106,84 +134,114 @@ def scrape() -> ResponseReturnValue:
 
                     total_found += len(clinics)
 
+                    # キープアライブチェック
+                    if time.time() - last_keepalive > keepalive_interval:
+                        yield _create_keepalive()
+                        last_keepalive = time.time()
+
                     # キーワード除外
+                    logger.info(f"[REGION {i+1}] キーワード除外フィルター適用中...")
                     filtered = exclusion_filter.filter(clinics)
                     excluded_count = len(clinics) - len(filtered)
                     total_excluded += excluded_count
 
                     if excluded_count > 0:
-                        logger.info(f"[REGION {i+1}] キーワード除外: {excluded_count}件")
+                        logger.info(f"[REGION {i+1}] キーワード除外: {excluded_count}件 (残り: {len(filtered)}件)")
                         yield _create_sse_message(
                             "log", message=f"キーワード除外: {excluded_count}件"
                         )
 
                     if not filtered:
-                        logger.info(f"[REGION {i+1}] フィルタ後0件、スキップ")
+                        logger.info(f"[REGION {i+1}] フィルタ後0件、次の地域へ")
+                        yield _create_sse_message(
+                            "log", message="→ スキップ（フィルタ後0件）"
+                        )
+                        continue
+
+                    # キープアライブチェック
+                    if time.time() - last_keepalive > keepalive_interval:
+                        yield _create_keepalive()
+                        last_keepalive = time.time()
+
+                    # Claude API検証（地域ごと）
+                    logger.info(f"[REGION {i+1}] Claude API検証開始: {len(filtered)}件")
+                    yield _create_sse_message(
+                        "log", message=f"Claude APIで検証中... ({len(filtered)}件)"
+                    )
+
+                    validated = validator.validate_batch(filtered)
+                    valid_clinics = [c for c in validated if c.get("is_valid", False)]
+
+                    logger.info(f"[REGION {i+1}] Claude API検証完了: 有効={len(valid_clinics)}件, 無効={len(validated)-len(valid_clinics)}件")
+                    yield _create_sse_message(
+                        "log", message=f"検証完了: 有効 {len(valid_clinics)}件"
+                    )
+
+                    if not valid_clinics:
+                        logger.info(f"[REGION {i+1}] 有効クリニック0件、次の地域へ")
                         yield _create_sse_message(
                             "log", message="→ スキップ（有効0件）"
                         )
                         continue
 
-                    # Claude API検証（地域ごと）
-                    logger.info(f"[REGION {i+1}] Claude API検証開始: {len(filtered)}件")
-                    yield _create_sse_message(
-                        "log", message=f"Claude APIで検証中..."
-                    )
-                    validated = validator.validate_batch(filtered)
-                    valid_clinics = [c for c in validated if c.get("is_valid", False)]
-
-                    logger.info(f"[REGION {i+1}] 有効クリニック: {len(valid_clinics)}件")
-                    yield _create_sse_message(
-                        "log", message=f"有効クリニック: {len(valid_clinics)}件"
-                    )
-
-                    if not valid_clinics:
-                        logger.info(f"[REGION {i+1}] 検証後0件、スキップ")
-                        yield _create_sse_message(
-                            "log", message="→ スキップ（検証後0件）"
-                        )
-                        continue
+                    # キープアライブチェック
+                    if time.time() - last_keepalive > keepalive_interval:
+                        yield _create_keepalive()
+                        last_keepalive = time.time()
 
                     # Google Sheets書き込み（地域ごとに即時保存）
+                    logger.info(f"[REGION {i+1}] Google Sheets書き込み開始...")
                     try:
                         new_count = sheets_writer.append(valid_clinics)
                         total_new += new_count
-                        logger.info(f"[REGION {i+1}] Sheets保存: {new_count}件（累計: {total_new}件）")
+                        logger.info(f"[REGION {i+1}] Sheets書き込み完了: 新規={new_count}件 (累計: {total_new}件)")
                         yield _create_sse_message(
                             "log",
-                            message=f"→ Sheets保存: {new_count}件（累計: {total_new}件）",
+                            message=f"→ Sheets保存: 新規{new_count}件 (累計: {total_new}件)",
                         )
                         all_valid_clinics.extend(valid_clinics)
                     except SheetsError as e:
                         logger.error(f"[REGION {i+1}] Sheets書き込みエラー: {e.message}")
                         yield _create_sse_message(
-                            "log", message=f"Sheets書き込みエラー: {e.message}"
+                            "log", message=f"[WARN] Sheets書き込みエラー: {e.message}"
                         )
                     except Exception as e:
-                        logger.error(f"[REGION {i+1}] Sheets書き込みエラー: {e}")
+                        logger.error(f"[REGION {i+1}] Sheets書き込みエラー: {type(e).__name__}: {e}")
+                        logger.error(f"[REGION {i+1}] スタックトレース:\n{traceback.format_exc()}")
                         yield _create_sse_message(
-                            "log", message=f"Sheets書き込みエラー: {str(e)}"
+                            "log", message=f"[WARN] Sheets書き込みエラー: {str(e)}"
                         )
 
                 except ScrapingError as e:
                     logger.error(f"[REGION {i+1}] スクレイピングエラー: {e.message}")
                     yield _create_sse_message(
-                        "log", message=f"検索エラー: {e.message}"
+                        "log", message=f"[WARN] 検索エラー: {e.message}"
                     )
                     continue
                 except Exception as e:
                     logger.error(f"[REGION {i+1}] 予期せぬエラー: {type(e).__name__}: {e}")
                     logger.error(f"[REGION {i+1}] スタックトレース:\n{traceback.format_exc()}")
                     yield _create_sse_message(
-                        "error", message=f"予期せぬエラー: {type(e).__name__}: {e}"
+                        "log", message=f"[ERROR] 予期せぬエラー: {type(e).__name__}: {e}"
                     )
                     continue
                 finally:
                     region_elapsed = time.time() - region_start
-                    logger.info(f"[REGION {i+1}] 完了: {region_elapsed:.1f}秒, メモリ: {_get_memory_mb():.1f} MB")
+                    mem_mb = _get_memory_mb()
+                    logger.info(f"[REGION {i+1}] ========== 完了: {region_elapsed:.1f}秒, メモリ: {mem_mb:.1f} MB ==========")
+                    yield _create_sse_message(
+                        "log", message=f"地域完了: {region_elapsed:.1f}秒"
+                    )
 
             session_elapsed = time.time() - session_start
-            logger.info(f"[SESSION] 完了: {session_elapsed:.1f}秒, 累計: {total_new}件, メモリ: {_get_memory_mb():.1f} MB")
+            mem_mb = _get_memory_mb()
+            logger.info(f"[SESSION] ========== セッション完了 ==========")
+            logger.info(f"[SESSION] 総時間: {session_elapsed:.1f}秒")
+            logger.info(f"[SESSION] 検索結果: {total_found}件")
+            logger.info(f"[SESSION] 除外: {total_excluded}件")
+            logger.info(f"[SESSION] 有効: {len(all_valid_clinics)}件")
+            logger.info(f"[SESSION] 新規保存: {total_new}件")
+            logger.info(f"[SESSION] 最終メモリ: {mem_mb:.1f} MB")
 
             yield _create_sse_message(
                 "complete",
@@ -198,7 +256,7 @@ def scrape() -> ResponseReturnValue:
             logger.exception(f"[SESSION] 致命的エラー: {type(e).__name__}: {e}")
             logger.error(f"[SESSION] スタックトレース:\n{traceback.format_exc()}")
             logger.error(f"[SESSION] メモリ使用量: {_get_memory_mb():.1f} MB")
-            yield _create_sse_message("error", message=f"{type(e).__name__}: {e}")
+            yield _create_sse_message("error", message=f"致命的エラー: {type(e).__name__}: {e}")
 
     return Response(
         generate(),
