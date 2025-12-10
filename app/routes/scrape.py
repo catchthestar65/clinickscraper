@@ -2,6 +2,9 @@
 
 import json
 import logging
+import os
+import time
+import traceback
 from typing import Generator
 
 from flask import Blueprint, request, jsonify, Response
@@ -17,6 +20,19 @@ from app.exceptions import ScrapingError, SheetsError
 
 logger = logging.getLogger(__name__)
 bp = Blueprint("scrape", __name__, url_prefix="/api")
+
+
+def _get_memory_mb() -> float:
+    """現在のメモリ使用量をMB単位で取得"""
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        if os.uname().sysname == "Darwin":
+            return rusage.ru_maxrss / (1024 * 1024)
+        else:
+            return rusage.ru_maxrss / 1024
+    except Exception:
+        return 0.0
 
 
 def _create_sse_message(type_: str, **data) -> str:
@@ -49,6 +65,10 @@ def scrape() -> ResponseReturnValue:
         return jsonify({"success": False, "error": str(e)}), 400
 
     def generate() -> Generator[str, None, None]:
+        session_start = time.time()
+        logger.info(f"[SESSION] スクレイピング開始: {len(scrape_request.regions)}地域")
+        logger.info(f"[SESSION] メモリ使用量: {_get_memory_mb():.1f} MB")
+
         try:
             scraper = GoogleMapsScraper()
             exclusion_filter = ExclusionFilter()
@@ -62,7 +82,10 @@ def scrape() -> ResponseReturnValue:
 
             # 各地域を検索（地域ごとに即時Sheets書き込み）
             for i, region in enumerate(scrape_request.regions):
+                region_start = time.time()
                 query = f"{region} {scrape_request.search_suffix}"
+
+                logger.info(f"[REGION {i+1}/{len(scrape_request.regions)}] 開始: {query}")
                 yield _create_sse_message(
                     "log",
                     message=f"[{i+1}/{len(scrape_request.regions)}] {query} で検索開始...",
@@ -75,6 +98,7 @@ def scrape() -> ResponseReturnValue:
                     )
 
                     if not clinics:
+                        logger.info(f"[REGION {i+1}] 結果0件、スキップ")
                         yield _create_sse_message(
                             "log", message="→ スキップ（0件）"
                         )
@@ -88,28 +112,33 @@ def scrape() -> ResponseReturnValue:
                     total_excluded += excluded_count
 
                     if excluded_count > 0:
+                        logger.info(f"[REGION {i+1}] キーワード除外: {excluded_count}件")
                         yield _create_sse_message(
                             "log", message=f"キーワード除外: {excluded_count}件"
                         )
 
                     if not filtered:
+                        logger.info(f"[REGION {i+1}] フィルタ後0件、スキップ")
                         yield _create_sse_message(
                             "log", message="→ スキップ（有効0件）"
                         )
                         continue
 
                     # Claude API検証（地域ごと）
+                    logger.info(f"[REGION {i+1}] Claude API検証開始: {len(filtered)}件")
                     yield _create_sse_message(
                         "log", message=f"Claude APIで検証中..."
                     )
                     validated = validator.validate_batch(filtered)
                     valid_clinics = [c for c in validated if c.get("is_valid", False)]
 
+                    logger.info(f"[REGION {i+1}] 有効クリニック: {len(valid_clinics)}件")
                     yield _create_sse_message(
                         "log", message=f"有効クリニック: {len(valid_clinics)}件"
                     )
 
                     if not valid_clinics:
+                        logger.info(f"[REGION {i+1}] 検証後0件、スキップ")
                         yield _create_sse_message(
                             "log", message="→ スキップ（検証後0件）"
                         )
@@ -119,25 +148,42 @@ def scrape() -> ResponseReturnValue:
                     try:
                         new_count = sheets_writer.append(valid_clinics)
                         total_new += new_count
+                        logger.info(f"[REGION {i+1}] Sheets保存: {new_count}件（累計: {total_new}件）")
                         yield _create_sse_message(
                             "log",
                             message=f"→ Sheets保存: {new_count}件（累計: {total_new}件）",
                         )
                         all_valid_clinics.extend(valid_clinics)
                     except SheetsError as e:
+                        logger.error(f"[REGION {i+1}] Sheets書き込みエラー: {e.message}")
                         yield _create_sse_message(
                             "log", message=f"Sheets書き込みエラー: {e.message}"
                         )
                     except Exception as e:
+                        logger.error(f"[REGION {i+1}] Sheets書き込みエラー: {e}")
                         yield _create_sse_message(
                             "log", message=f"Sheets書き込みエラー: {str(e)}"
                         )
 
                 except ScrapingError as e:
+                    logger.error(f"[REGION {i+1}] スクレイピングエラー: {e.message}")
                     yield _create_sse_message(
                         "log", message=f"検索エラー: {e.message}"
                     )
                     continue
+                except Exception as e:
+                    logger.error(f"[REGION {i+1}] 予期せぬエラー: {type(e).__name__}: {e}")
+                    logger.error(f"[REGION {i+1}] スタックトレース:\n{traceback.format_exc()}")
+                    yield _create_sse_message(
+                        "error", message=f"予期せぬエラー: {type(e).__name__}: {e}"
+                    )
+                    continue
+                finally:
+                    region_elapsed = time.time() - region_start
+                    logger.info(f"[REGION {i+1}] 完了: {region_elapsed:.1f}秒, メモリ: {_get_memory_mb():.1f} MB")
+
+            session_elapsed = time.time() - session_start
+            logger.info(f"[SESSION] 完了: {session_elapsed:.1f}秒, 累計: {total_new}件, メモリ: {_get_memory_mb():.1f} MB")
 
             yield _create_sse_message(
                 "complete",
@@ -149,8 +195,10 @@ def scrape() -> ResponseReturnValue:
             )
 
         except Exception as e:
-            logger.exception("Scraping error")
-            yield _create_sse_message("error", message=str(e))
+            logger.exception(f"[SESSION] 致命的エラー: {type(e).__name__}: {e}")
+            logger.error(f"[SESSION] スタックトレース:\n{traceback.format_exc()}")
+            logger.error(f"[SESSION] メモリ使用量: {_get_memory_mb():.1f} MB")
+            yield _create_sse_message("error", message=f"{type(e).__name__}: {e}")
 
     return Response(
         generate(),

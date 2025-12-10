@@ -1,13 +1,15 @@
 """Google Mapsスクレイピングサービス"""
 
 import logging
+import os
 import re
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Generator, Any
 
-from playwright.sync_api import sync_playwright, Browser, Page, Playwright
+from playwright.sync_api import sync_playwright, Browser, Page, Playwright, TimeoutError as PlaywrightTimeout
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from app.config import config
@@ -18,6 +20,26 @@ logger = logging.getLogger(__name__)
 
 # グローバルスレッドプール（Playwrightをasyncioループ外で実行）
 _executor = ThreadPoolExecutor(max_workers=2)
+
+
+def _get_memory_usage_mb() -> float:
+    """現在のメモリ使用量をMB単位で取得"""
+    try:
+        import resource
+        rusage = resource.getrusage(resource.RUSAGE_SELF)
+        # macOSはbytes、Linuxはkilobytes
+        if os.uname().sysname == "Darwin":
+            return rusage.ru_maxrss / (1024 * 1024)
+        else:
+            return rusage.ru_maxrss / 1024
+    except Exception:
+        return 0.0
+
+
+def _log_memory(context: str) -> None:
+    """メモリ使用量をログ出力"""
+    mem_mb = _get_memory_usage_mb()
+    logger.info(f"[MEMORY] {context}: {mem_mb:.1f} MB")
 
 
 class GoogleMapsScraper:
@@ -38,43 +60,80 @@ class GoogleMapsScraper:
     @contextmanager
     def _browser_context(self) -> Generator[Page, None, None]:
         """ブラウザコンテキストマネージャー"""
-        playwright = sync_playwright().start()
-        # メモリ使用量を削減するブラウザ引数
-        browser = playwright.chromium.launch(
-            headless=self.headless,
-            args=[
-                "--disable-dev-shm-usage",  # /dev/shm使用を無効化（メモリ節約）
-                "--disable-gpu",  # GPU無効化
-                "--no-sandbox",  # サンドボックス無効化
-                "--single-process",  # シングルプロセスモード
-                "--disable-setuid-sandbox",
-                "--disable-extensions",  # 拡張機能無効化
-                "--disable-background-networking",
-                "--disable-default-apps",
-                "--disable-sync",
-                "--disable-translate",
-                "--no-first-run",
-                "--disable-features=site-per-process",  # プロセス分離無効化
-                "--js-flags=--max-old-space-size=256",  # JSヒープ制限
-            ],
-        )
-        context = browser.new_context(
-            locale="ja-JP",
-            viewport={"width": 1280, "height": 720},  # 少し小さく
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-        )
-        page = context.new_page()
+        _log_memory("ブラウザ起動前")
+        logger.info("[BROWSER] Playwright開始...")
+
+        playwright = None
+        browser = None
+        context = None
 
         try:
+            playwright = sync_playwright().start()
+            logger.info("[BROWSER] Chromium起動中...")
+
+            # メモリ使用量を削減するブラウザ引数
+            browser = playwright.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--disable-dev-shm-usage",  # /dev/shm使用を無効化（メモリ節約）
+                    "--disable-gpu",  # GPU無効化
+                    "--no-sandbox",  # サンドボックス無効化
+                    "--single-process",  # シングルプロセスモード
+                    "--disable-setuid-sandbox",
+                    "--disable-extensions",  # 拡張機能無効化
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--disable-translate",
+                    "--no-first-run",
+                    "--disable-features=site-per-process",  # プロセス分離無効化
+                    "--js-flags=--max-old-space-size=256",  # JSヒープ制限
+                ],
+            )
+
+            _log_memory("Chromium起動後")
+            logger.info("[BROWSER] コンテキスト作成中...")
+
+            context = browser.new_context(
+                locale="ja-JP",
+                viewport={"width": 1280, "height": 720},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+            page = context.new_page()
+            logger.info("[BROWSER] ページ作成完了")
+            _log_memory("ページ作成後")
+
             yield page
+
+        except Exception as e:
+            logger.error(f"[BROWSER] ブラウザ初期化エラー: {type(e).__name__}: {e}")
+            logger.error(f"[BROWSER] スタックトレース:\n{traceback.format_exc()}")
+            raise
         finally:
-            context.close()
-            browser.close()
-            playwright.stop()
+            logger.info("[BROWSER] クリーンアップ開始...")
+            if context:
+                try:
+                    context.close()
+                    logger.info("[BROWSER] コンテキスト閉じました")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] コンテキスト終了エラー: {e}")
+            if browser:
+                try:
+                    browser.close()
+                    logger.info("[BROWSER] ブラウザ閉じました")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] ブラウザ終了エラー: {e}")
+            if playwright:
+                try:
+                    playwright.stop()
+                    logger.info("[BROWSER] Playwright停止しました")
+                except Exception as e:
+                    logger.warning(f"[BROWSER] Playwright終了エラー: {e}")
+            _log_memory("ブラウザ終了後")
 
     def search(self, query: str, max_results: int | None = None) -> list[Clinic]:
         """
@@ -96,57 +155,83 @@ class GoogleMapsScraper:
         """検索の実装（別スレッドで実行）"""
         max_results = max_results or self.max_results
         clinics: list[Clinic] = []
+        start_time = time.time()
 
-        logger.info(f"Starting search: {query} (max: {max_results})")
+        logger.info(f"[SEARCH] 検索開始: '{query}' (最大: {max_results}件)")
+        _log_memory("検索開始")
 
         with self._browser_context() as page:
             try:
                 # Google Maps検索
                 search_url = f"{self.BASE_URL}{query.replace(' ', '+')}"
-                page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+                logger.info(f"[SEARCH] URL: {search_url}")
+                logger.info("[SEARCH] ページ読み込み中...")
+
+                try:
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
+                    logger.info("[SEARCH] ページ読み込み完了 (domcontentloaded)")
+                except PlaywrightTimeout as e:
+                    logger.error(f"[SEARCH] ページ読み込みタイムアウト (60秒): {e}")
+                    raise ScrapingError(f"ページ読み込みタイムアウト: {query}")
+                except Exception as e:
+                    logger.error(f"[SEARCH] ページ読み込みエラー: {type(e).__name__}: {e}")
+                    logger.error(f"[SEARCH] スタックトレース:\n{traceback.format_exc()}")
+                    raise
 
                 # ページが完全に読み込まれるまで待機
+                logger.info("[SEARCH] 追加待機 (3秒)...")
                 page.wait_for_timeout(3000)
+                _log_memory("ページ読み込み後")
 
                 # クッキー同意ダイアログがあれば閉じる
                 self._handle_consent_dialog(page)
 
                 # 単一結果ページかどうかをチェック
-                # （feedがない && h1が「結果」でない場合は単一結果）
                 feed = page.query_selector('[role="feed"]')
                 h1_el = page.query_selector("h1")
                 h1_text = h1_el.inner_text() if h1_el else ""
+                logger.info(f"[SEARCH] ページ解析: feed={feed is not None}, h1='{h1_text}'")
 
                 if not feed and h1_text and h1_text != "結果":
-                    # 単一結果ページ: 詳細パネルから直接取得
-                    logger.info(f"Single result page detected: {h1_text}")
+                    # 単一結果ページ
+                    logger.info(f"[SEARCH] 単一結果ページ検出: {h1_text}")
                     clinic = self._extract_single_result(page, h1_text)
                     if clinic:
                         clinics.append(clinic)
+                        logger.info(f"[SEARCH] 単一結果を抽出: {clinic.name}")
                 else:
-                    # 複数結果ページ: 通常のスクロール処理
-                    # 検索結果のスクロールで全件読み込み
+                    # 複数結果ページ
+                    logger.info("[SEARCH] 複数結果ページ - スクロール開始...")
                     self._scroll_results(page, max_results)
+                    _log_memory("スクロール後")
 
-                    # 各クリニックの情報を取得
-                    # Google Mapsの検索結果リンクを取得
                     results = page.query_selector_all('a[href*="/maps/place/"]')
-                    logger.info(f"Found {len(results)} results")
+                    logger.info(f"[SEARCH] 検索結果: {len(results)}件発見")
 
                     for i, result in enumerate(results[:max_results]):
                         try:
+                            if i > 0 and i % 10 == 0:
+                                _log_memory(f"抽出中 ({i}件目)")
+
                             clinic = self._extract_clinic_info(result, page, i)
                             if clinic:
                                 clinics.append(clinic)
                         except Exception as e:
-                            logger.warning(f"Error extracting clinic {i}: {e}")
+                            logger.warning(f"[SEARCH] クリニック {i} 抽出エラー: {type(e).__name__}: {e}")
                             continue
 
+            except ScrapingError:
+                raise
             except Exception as e:
-                logger.error(f"Search error: {e}")
-                raise ScrapingError(f"Google Maps検索中にエラーが発生しました: {e}")
+                elapsed = time.time() - start_time
+                logger.error(f"[SEARCH] 検索エラー ({elapsed:.1f}秒経過): {type(e).__name__}: {e}")
+                logger.error(f"[SEARCH] スタックトレース:\n{traceback.format_exc()}")
+                _log_memory("エラー発生時")
+                raise ScrapingError(f"Google Maps検索中にエラーが発生しました: {type(e).__name__}: {e}")
 
-        logger.info(f"Successfully extracted {len(clinics)} clinics")
+        elapsed = time.time() - start_time
+        logger.info(f"[SEARCH] 検索完了: {len(clinics)}件抽出 ({elapsed:.1f}秒)")
+        _log_memory("検索完了")
         return clinics
 
     def _handle_consent_dialog(self, page: Page) -> None:
