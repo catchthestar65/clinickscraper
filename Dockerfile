@@ -27,22 +27,27 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# 非rootユーザー作成（先に作成してPlaywrightブラウザを共有）
+RUN useradd -m appuser
+
 # Python依存関係インストール
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Playwrightブラウザインストール
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# Playwrightブラウザインストール（共有ディレクトリに配置）
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN mkdir -p /opt/playwright-browsers && \
+    playwright install chromium && \
+    playwright install-deps chromium && \
+    chmod -R 755 /opt/playwright-browsers
 
 # アプリケーションコピー
 COPY . .
 
-# 設定ディレクトリの権限
-RUN chmod -R 755 /app/config
+# 設定ディレクトリの権限とオーナー設定
+RUN chmod -R 755 /app/config && \
+    chown -R appuser:appuser /app
 
-# 非rootユーザーで実行
-RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 5000
