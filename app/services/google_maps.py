@@ -3,7 +3,6 @@
 import logging
 import os
 import re
-import signal
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -20,45 +19,26 @@ from app.models.clinic import Clinic
 logger = logging.getLogger(__name__)
 
 
-def _cleanup_with_timeout(func, timeout_seconds: int = 5, description: str = ""):
+def _safe_cleanup(func, description: str = ""):
     """
-    タイムアウト付きでクリーンアップ関数を実行（スレッドセーフ版）
+    クリーンアップ関数を安全に実行（エラーをキャッチしてログ出力）
+
+    注意: スレッドベースのタイムアウトはPlaywrightの内部状態を破壊するため使用しない。
+    クリーンアップが遅い場合でも、状態破壊よりはマシ。
 
     Args:
         func: 実行する関数
-        timeout_seconds: タイムアウト秒数
         description: ログ用の説明
 
     Returns:
         成功したかどうか
     """
-    import threading
-
-    result = {"success": False, "error": None}
-
-    def run_cleanup():
-        try:
-            func()
-            result["success"] = True
-        except Exception as e:
-            result["error"] = e
-
-    # 別スレッドでクリーンアップを実行し、タイムアウトを設定
-    cleanup_thread = threading.Thread(target=run_cleanup)
-    cleanup_thread.daemon = True  # メインスレッド終了時に強制終了
-    cleanup_thread.start()
-    cleanup_thread.join(timeout=timeout_seconds)
-
-    if cleanup_thread.is_alive():
-        # タイムアウト - スレッドはデーモンなので放置してOK
-        logger.warning(f"[BROWSER] {description}がタイムアウト ({timeout_seconds}秒) - スキップして続行")
+    try:
+        func()
+        return True
+    except Exception as e:
+        logger.warning(f"[BROWSER] {description}エラー（続行）: {type(e).__name__}: {e}")
         return False
-
-    if result["error"]:
-        logger.warning(f"[BROWSER] {description}エラー: {result['error']}")
-        return False
-
-    return result["success"]
 
 # グローバルスレッドプール（Playwrightをasyncioループ外で実行）
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -159,35 +139,19 @@ class GoogleMapsScraper:
             logger.info("[BROWSER] クリーンアップ開始...")
             cleanup_start = time.time()
 
-            # タイムアウト付きクリーンアップ（各ステップ最大5秒）
-            # ハングを防ぐため、タイムアウト時は強制的に次へ進む
-            CLEANUP_TIMEOUT = 5  # 秒
+            # シンプルなクリーンアップ（スレッドタイムアウトは状態破壊を引き起こすため使用しない）
+            # 遅い場合でも完了を待つ（状態破壊より安全）
 
             if context:
-                success = _cleanup_with_timeout(
-                    lambda: context.close(),
-                    timeout_seconds=CLEANUP_TIMEOUT,
-                    description="コンテキスト終了"
-                )
-                if success:
+                if _safe_cleanup(lambda: context.close(), "コンテキスト終了"):
                     logger.info("[BROWSER] コンテキスト終了完了")
 
             if browser:
-                success = _cleanup_with_timeout(
-                    lambda: browser.close(),
-                    timeout_seconds=CLEANUP_TIMEOUT,
-                    description="ブラウザ終了"
-                )
-                if success:
+                if _safe_cleanup(lambda: browser.close(), "ブラウザ終了"):
                     logger.info("[BROWSER] ブラウザ終了完了")
 
             if playwright:
-                success = _cleanup_with_timeout(
-                    lambda: playwright.stop(),
-                    timeout_seconds=CLEANUP_TIMEOUT,
-                    description="Playwright停止"
-                )
-                if success:
+                if _safe_cleanup(lambda: playwright.stop(), "Playwright停止"):
                     logger.info("[BROWSER] Playwright停止完了")
 
             cleanup_elapsed = time.time() - cleanup_start
