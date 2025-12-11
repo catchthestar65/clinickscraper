@@ -112,33 +112,33 @@ class GoogleMapsScraper:
             logger.info("[BROWSER] クリーンアップ開始...")
             cleanup_start = time.time()
 
-            # Async版は素直にcloseを呼ぶだけ（asyncioが適切にハンドル）
-            # タイムアウト付きで実行
+            # Async版のクリーンアップ（短いタイムアウトでメモリ解放を優先）
+            # タイムアウト: 各2秒（合計最大6秒）
             try:
                 if context:
                     try:
-                        await asyncio.wait_for(context.close(), timeout=5.0)
+                        await asyncio.wait_for(context.close(), timeout=2.0)
                         logger.info("[BROWSER] コンテキスト終了完了")
                     except asyncio.TimeoutError:
-                        logger.warning("[BROWSER] コンテキスト終了タイムアウト")
+                        logger.warning("[BROWSER] コンテキスト終了タイムアウト(2秒)")
                     except Exception as e:
                         logger.warning(f"[BROWSER] コンテキスト終了エラー: {e}")
 
                 if browser:
                     try:
-                        await asyncio.wait_for(browser.close(), timeout=5.0)
+                        await asyncio.wait_for(browser.close(), timeout=2.0)
                         logger.info("[BROWSER] ブラウザ終了完了")
                     except asyncio.TimeoutError:
-                        logger.warning("[BROWSER] ブラウザ終了タイムアウト")
+                        logger.warning("[BROWSER] ブラウザ終了タイムアウト(2秒)")
                     except Exception as e:
                         logger.warning(f"[BROWSER] ブラウザ終了エラー: {e}")
 
                 if playwright:
                     try:
-                        await asyncio.wait_for(playwright.stop(), timeout=5.0)
+                        await asyncio.wait_for(playwright.stop(), timeout=2.0)
                         logger.info("[BROWSER] Playwright停止完了")
                     except asyncio.TimeoutError:
-                        logger.warning("[BROWSER] Playwright停止タイムアウト")
+                        logger.warning("[BROWSER] Playwright停止タイムアウト(2秒)")
                     except Exception as e:
                         logger.warning(f"[BROWSER] Playwright停止エラー: {e}")
             except Exception as e:
