@@ -3,9 +3,10 @@
 import logging
 import os
 import re
+import signal
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 from typing import Generator, Any
 
@@ -17,6 +18,48 @@ from app.exceptions import ScrapingError
 from app.models.clinic import Clinic
 
 logger = logging.getLogger(__name__)
+
+
+class CleanupTimeoutError(Exception):
+    """クリーンアップタイムアウトエラー"""
+    pass
+
+
+def _cleanup_with_timeout(func, timeout_seconds: int = 5, description: str = ""):
+    """
+    タイムアウト付きでクリーンアップ関数を実行
+
+    Args:
+        func: 実行する関数
+        timeout_seconds: タイムアウト秒数
+        description: ログ用の説明
+
+    Returns:
+        成功したかどうか
+    """
+    def timeout_handler(signum, frame):
+        raise CleanupTimeoutError(f"{description}がタイムアウト ({timeout_seconds}秒)")
+
+    # Unix系のみsignal.alarmを使用
+    use_signal = hasattr(signal, 'SIGALRM')
+
+    if use_signal:
+        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(timeout_seconds)
+
+    try:
+        func()
+        return True
+    except CleanupTimeoutError as e:
+        logger.warning(f"[BROWSER] {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"[BROWSER] {description}エラー: {e}")
+        return False
+    finally:
+        if use_signal:
+            signal.alarm(0)  # タイマーをキャンセル
+            signal.signal(signal.SIGALRM, old_handler)
 
 # グローバルスレッドプール（Playwrightをasyncioループ外で実行）
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -117,28 +160,36 @@ class GoogleMapsScraper:
             logger.info("[BROWSER] クリーンアップ開始...")
             cleanup_start = time.time()
 
-            # シンプルなtry/exceptでクリーンアップ
-            # スレッディングはPlaywrightのasyncio状態を破壊するため使用しない
+            # タイムアウト付きクリーンアップ（各ステップ最大5秒）
+            # ハングを防ぐため、タイムアウト時は強制的に次へ進む
+            CLEANUP_TIMEOUT = 5  # 秒
+
             if context:
-                try:
-                    context.close()
+                success = _cleanup_with_timeout(
+                    lambda: context.close(),
+                    timeout_seconds=CLEANUP_TIMEOUT,
+                    description="コンテキスト終了"
+                )
+                if success:
                     logger.info("[BROWSER] コンテキスト終了完了")
-                except Exception as e:
-                    logger.warning(f"[BROWSER] コンテキスト終了エラー: {e}")
 
             if browser:
-                try:
-                    browser.close()
+                success = _cleanup_with_timeout(
+                    lambda: browser.close(),
+                    timeout_seconds=CLEANUP_TIMEOUT,
+                    description="ブラウザ終了"
+                )
+                if success:
                     logger.info("[BROWSER] ブラウザ終了完了")
-                except Exception as e:
-                    logger.warning(f"[BROWSER] ブラウザ終了エラー: {e}")
 
             if playwright:
-                try:
-                    playwright.stop()
+                success = _cleanup_with_timeout(
+                    lambda: playwright.stop(),
+                    timeout_seconds=CLEANUP_TIMEOUT,
+                    description="Playwright停止"
+                )
+                if success:
                     logger.info("[BROWSER] Playwright停止完了")
-                except Exception as e:
-                    logger.warning(f"[BROWSER] Playwright停止エラー: {e}")
 
             cleanup_elapsed = time.time() - cleanup_start
             logger.info(f"[BROWSER] クリーンアップ完了 ({cleanup_elapsed:.1f}秒)")
@@ -201,9 +252,37 @@ class GoogleMapsScraper:
                 h1_text = h1_el.inner_text() if h1_el else ""
                 logger.info(f"[SEARCH] ページ解析: feed={feed is not None}, h1='{h1_text}'")
 
+                # 単一結果ページの場合、クエリを修正してリトライ
                 if not feed and h1_text and h1_text != "結果":
-                    # 単一結果ページ
-                    logger.info(f"[SEARCH] 単一結果ページ検出: {h1_text}")
+                    logger.warning(f"[SEARCH] 単一結果ページ検出: {h1_text}")
+
+                    # クエリに「クリニック」を追加してリトライ
+                    # （既に含まれている場合や明らかに異なる検索の場合はスキップ）
+                    retry_keywords = ["クリニック", "病院", "医院"]
+                    should_retry = not any(kw in query for kw in retry_keywords)
+
+                    if should_retry:
+                        modified_query = f"{query} クリニック"
+                        logger.info(f"[SEARCH] クエリを修正してリトライ: '{modified_query}'")
+
+                        retry_url = f"{self.BASE_URL}{modified_query.replace(' ', '+')}"
+                        try:
+                            page.goto(retry_url, wait_until="domcontentloaded", timeout=60000)
+                            page.wait_for_timeout(3000)
+                            self._handle_consent_dialog(page)
+
+                            # 再度ページ構造を確認
+                            feed = page.query_selector('[role="feed"]')
+                            h1_el = page.query_selector("h1")
+                            h1_text = h1_el.inner_text() if h1_el else ""
+                            logger.info(f"[SEARCH] リトライ後ページ解析: feed={feed is not None}, h1='{h1_text}'")
+                        except Exception as e:
+                            logger.warning(f"[SEARCH] リトライ失敗: {e}")
+
+                # 最終的なページタイプに基づいて処理
+                if not feed and h1_text and h1_text != "結果":
+                    # それでも単一結果ページの場合は1件だけ抽出
+                    logger.info(f"[SEARCH] 単一結果として抽出: {h1_text}")
                     clinic = self._extract_single_result(page, h1_text)
                     if clinic:
                         clinics.append(clinic)
