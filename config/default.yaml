@@ -12,7 +12,7 @@ scraping:
   page_load_timeout_seconds: 60
 
 claude:
-  model: "claude-sonnet-4-5"
+  model: "claude-sonnet-4-20250514"
   batch_size: 10
   max_tokens: 4096
 
