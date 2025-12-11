@@ -3,6 +3,7 @@
 import logging
 import os
 import re
+import signal
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -19,26 +20,114 @@ from app.models.clinic import Clinic
 logger = logging.getLogger(__name__)
 
 
-def _safe_cleanup(func, description: str = ""):
+def _force_kill_browser_process(browser: Browser, description: str = "ブラウザ") -> bool:
     """
-    クリーンアップ関数を安全に実行（エラーをキャッチしてログ出力）
+    ブラウザプロセスを強制終了する
 
-    注意: スレッドベースのタイムアウトはPlaywrightの内部状態を破壊するため使用しない。
-    クリーンアップが遅い場合でも、状態破壊よりはマシ。
+    close()がハングする場合の最終手段。プロセス自体を殺すので
+    Playwrightの内部状態は汚染されない（次回新規起動すればOK）。
 
     Args:
-        func: 実行する関数
+        browser: Playwrightのブラウザオブジェクト
         description: ログ用の説明
 
     Returns:
-        成功したかどうか
+        強制終了したかどうか
     """
     try:
-        func()
-        return True
+        # Playwrightのbrowser.processでブラウザプロセスを取得
+        process = getattr(browser, '_impl_obj', browser)
+        if hasattr(process, '_browser_process'):
+            browser_process = process._browser_process
+            if browser_process and browser_process.poll() is None:  # まだ実行中
+                pid = browser_process.pid
+                logger.warning(f"[BROWSER] {description}プロセスを強制終了: PID={pid}")
+                try:
+                    # まずSIGTERMで終了を試みる
+                    os.kill(pid, signal.SIGTERM)
+                    time.sleep(0.5)
+                    # まだ生きていたらSIGKILL
+                    if browser_process.poll() is None:
+                        os.kill(pid, signal.SIGKILL)
+                        logger.info(f"[BROWSER] SIGKILLで強制終了: PID={pid}")
+                    return True
+                except ProcessLookupError:
+                    logger.info(f"[BROWSER] プロセス既に終了: PID={pid}")
+                    return True
+                except Exception as e:
+                    logger.warning(f"[BROWSER] プロセス終了エラー: {e}")
     except Exception as e:
-        logger.warning(f"[BROWSER] {description}エラー（続行）: {type(e).__name__}: {e}")
-        return False
+        logger.debug(f"[BROWSER] プロセス取得エラー: {e}")
+    return False
+
+
+def _cleanup_with_process_kill(
+    browser: Browser | None,
+    context: Any | None,
+    playwright: Playwright | None,
+    timeout_seconds: int = 5
+) -> None:
+    """
+    タイムアウト付きクリーンアップ（ハング時はプロセス強制終了）
+
+    スレッドを放置せず、プロセス自体を殺すことでPlaywrightの内部状態を
+    汚染しない。
+
+    Args:
+        browser: ブラウザオブジェクト
+        context: コンテキストオブジェクト
+        playwright: Playwrightオブジェクト
+        timeout_seconds: 各ステップのタイムアウト秒数
+    """
+    import threading
+
+    def try_with_timeout(func, description: str) -> bool:
+        """タイムアウト付きで関数を実行（完了を待つ）"""
+        result = {"done": False, "error": None}
+
+        def run():
+            try:
+                func()
+                result["done"] = True
+            except Exception as e:
+                result["error"] = e
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_seconds)
+
+        if thread.is_alive():
+            # タイムアウト - スレッドはまだ実行中だが、後でプロセスを殺すので問題ない
+            logger.warning(f"[BROWSER] {description}がタイムアウト ({timeout_seconds}秒)")
+            return False
+
+        if result["error"]:
+            logger.warning(f"[BROWSER] {description}エラー: {result['error']}")
+            return False
+
+        return result["done"]
+
+    # 1. コンテキストを閉じる（タイムアウト付き）
+    if context:
+        if try_with_timeout(lambda: context.close(), "コンテキスト終了"):
+            logger.info("[BROWSER] コンテキスト終了完了")
+
+    # 2. ブラウザを閉じる（タイムアウト付き、失敗時はプロセス強制終了）
+    if browser:
+        if try_with_timeout(lambda: browser.close(), "ブラウザ終了"):
+            logger.info("[BROWSER] ブラウザ終了完了")
+        else:
+            # close()がハングした場合、プロセスを直接殺す
+            _force_kill_browser_process(browser)
+
+    # 3. Playwrightを停止（タイムアウト付き）
+    if playwright:
+        if try_with_timeout(lambda: playwright.stop(), "Playwright停止"):
+            logger.info("[BROWSER] Playwright停止完了")
+        else:
+            # stop()がハングしても、ブラウザプロセスは既に殺しているので
+            # 最終的にはPlaywrightも終了するはず
+            logger.warning("[BROWSER] Playwright停止タイムアウト - 続行")
 
 # グローバルスレッドプール（Playwrightをasyncioループ外で実行）
 _executor = ThreadPoolExecutor(max_workers=2)
@@ -139,20 +228,15 @@ class GoogleMapsScraper:
             logger.info("[BROWSER] クリーンアップ開始...")
             cleanup_start = time.time()
 
-            # シンプルなクリーンアップ（スレッドタイムアウトは状態破壊を引き起こすため使用しない）
-            # 遅い場合でも完了を待つ（状態破壊より安全）
-
-            if context:
-                if _safe_cleanup(lambda: context.close(), "コンテキスト終了"):
-                    logger.info("[BROWSER] コンテキスト終了完了")
-
-            if browser:
-                if _safe_cleanup(lambda: browser.close(), "ブラウザ終了"):
-                    logger.info("[BROWSER] ブラウザ終了完了")
-
-            if playwright:
-                if _safe_cleanup(lambda: playwright.stop(), "Playwright停止"):
-                    logger.info("[BROWSER] Playwright停止完了")
+            # タイムアウト付きクリーンアップ（ハング時はプロセス強制終了）
+            # スレッドを放置するのではなく、ブラウザプロセス自体を殺すことで
+            # Playwrightの内部状態を汚染しない
+            _cleanup_with_process_kill(
+                browser=browser,
+                context=context,
+                playwright=playwright,
+                timeout_seconds=5  # 各ステップ最大5秒
+            )
 
             cleanup_elapsed = time.time() - cleanup_start
             logger.info(f"[BROWSER] クリーンアップ完了 ({cleanup_elapsed:.1f}秒)")
