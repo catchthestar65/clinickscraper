@@ -20,14 +20,9 @@ from app.models.clinic import Clinic
 logger = logging.getLogger(__name__)
 
 
-class CleanupTimeoutError(Exception):
-    """クリーンアップタイムアウトエラー"""
-    pass
-
-
 def _cleanup_with_timeout(func, timeout_seconds: int = 5, description: str = ""):
     """
-    タイムアウト付きでクリーンアップ関数を実行
+    タイムアウト付きでクリーンアップ関数を実行（スレッドセーフ版）
 
     Args:
         func: 実行する関数
@@ -37,29 +32,33 @@ def _cleanup_with_timeout(func, timeout_seconds: int = 5, description: str = "")
     Returns:
         成功したかどうか
     """
-    def timeout_handler(signum, frame):
-        raise CleanupTimeoutError(f"{description}がタイムアウト ({timeout_seconds}秒)")
+    import threading
 
-    # Unix系のみsignal.alarmを使用
-    use_signal = hasattr(signal, 'SIGALRM')
+    result = {"success": False, "error": None}
 
-    if use_signal:
-        old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout_seconds)
+    def run_cleanup():
+        try:
+            func()
+            result["success"] = True
+        except Exception as e:
+            result["error"] = e
 
-    try:
-        func()
-        return True
-    except CleanupTimeoutError as e:
-        logger.warning(f"[BROWSER] {e}")
+    # 別スレッドでクリーンアップを実行し、タイムアウトを設定
+    cleanup_thread = threading.Thread(target=run_cleanup)
+    cleanup_thread.daemon = True  # メインスレッド終了時に強制終了
+    cleanup_thread.start()
+    cleanup_thread.join(timeout=timeout_seconds)
+
+    if cleanup_thread.is_alive():
+        # タイムアウト - スレッドはデーモンなので放置してOK
+        logger.warning(f"[BROWSER] {description}がタイムアウト ({timeout_seconds}秒) - スキップして続行")
         return False
-    except Exception as e:
-        logger.warning(f"[BROWSER] {description}エラー: {e}")
+
+    if result["error"]:
+        logger.warning(f"[BROWSER] {description}エラー: {result['error']}")
         return False
-    finally:
-        if use_signal:
-            signal.alarm(0)  # タイマーをキャンセル
-            signal.signal(signal.SIGALRM, old_handler)
+
+    return result["success"]
 
 # グローバルスレッドプール（Playwrightをasyncioループ外で実行）
 _executor = ThreadPoolExecutor(max_workers=2)
